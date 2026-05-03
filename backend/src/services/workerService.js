@@ -1,23 +1,63 @@
-const OLLAMA_TIMEOUT_MS = 60000; // 60s — llama3 can be slow on CPU
+'use strict';
 
-const workers = [
-  { id: 1, name: 'Laptop 1', url: 'http://localhost:11434',   status: 'online'  },
-  { id: 2, name: 'Laptop 2', url: 'http://192.168.1.2:11434', status: 'offline' },
-  { id: 3, name: 'Laptop 3', url: 'http://192.168.1.3:11434', status: 'offline' },
-];
+const { randomUUID } = require('crypto');
 
+const OLLAMA_TIMEOUT_MS = 300000; // 5 min — slow CPU inference
+const HEARTBEAT_TTL_MS  = 30000;  // 30s — worker expires if silent
+const SWEEP_INTERVAL_MS = 10000;  // 10s — how often to evict stale workers
+
+// In-memory registry: workerID -> worker object
+const workers = new Map();
 let currentIndex = 0;
 
+// ---------- Registry lifecycle ----------
+
+function registerWorker({ name, ip, port = 11434, models = [] }) {
+  const id     = randomUUID();
+  const url    = `http://${ip}:${port}`;
+  const worker = { id, name, url, models, lastSeen: Date.now(), status: 'online' };
+  workers.set(id, worker);
+  console.log(`[registry] registered: ${name} (${url}) id=${id}`);
+  return id;
+}
+
+function deregisterWorker(id) {
+  const had = workers.has(id);
+  workers.delete(id);
+  if (had) console.log(`[registry] deregistered id=${id}`);
+  return had;
+}
+
+function refreshHeartbeat(id) {
+  const worker = workers.get(id);
+  if (!worker) return false;
+  worker.lastSeen = Date.now();
+  return true;
+}
+
+// Background sweep — evict workers that have gone silent
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, worker] of workers) {
+    if (now - worker.lastSeen > HEARTBEAT_TTL_MS) {
+      console.log(`[registry] evicting stale worker: ${worker.name} id=${id}`);
+      workers.delete(id);
+    }
+  }
+}, SWEEP_INTERVAL_MS);
+
+// ---------- Existing public interface (unchanged contract) ----------
+
 function getNextWorker() {
-  const online = workers.filter(w => w.status === 'online');
-  if (online.length === 0) return null;
+  if (workers.size === 0) return null;
+  const online = Array.from(workers.values());
   const worker = online[currentIndex % online.length];
   currentIndex = (currentIndex + 1) % online.length;
   return worker;
 }
 
 function getAllWorkers() {
-  return workers;
+  return Array.from(workers.values());
 }
 
 async function sendPromptToWorker(worker, prompt, model) {
@@ -43,4 +83,11 @@ async function sendPromptToWorker(worker, prompt, model) {
   }
 }
 
-module.exports = { getNextWorker, getAllWorkers, sendPromptToWorker };
+module.exports = {
+  registerWorker,
+  deregisterWorker,
+  refreshHeartbeat,
+  getNextWorker,
+  getAllWorkers,
+  sendPromptToWorker,
+};

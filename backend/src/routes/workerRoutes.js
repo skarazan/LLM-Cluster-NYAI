@@ -1,10 +1,45 @@
-const express = require('express');
-const router = express.Router();
-const { getAllWorkers } = require('../services/workerService');
+'use strict';
 
-// GET /workers — lists all registered workers and their status
+const express = require('express');
+const router  = express.Router();
+const {
+  getAllWorkers,
+  registerWorker,
+  deregisterWorker,
+  refreshHeartbeat,
+} = require('../services/workerService');
+
+// GET /workers — lists all registered workers
 router.get('/', (req, res) => {
   res.json({ workers: getAllWorkers() });
+});
+
+// POST /workers/register — worker self-registers on startup
+router.post('/register', (req, res) => {
+  const { name, ip, port, models } = req.body;
+  if (!name || !ip) {
+    return res.status(400).json({ error: 'Missing required fields: name, ip' });
+  }
+  const id = registerWorker({ name, ip, port, models });
+  res.status(201).json({ id });
+});
+
+// POST /workers/heartbeat — worker keeps its registration alive
+router.post('/heartbeat', (req, res) => {
+  const { id } = req.body;
+  if (!id) return res.status(400).json({ error: 'Missing required field: id' });
+  const ok = refreshHeartbeat(id);
+  if (!ok) return res.status(404).json({ error: 'Worker not found' });
+  res.json({ ok: true });
+});
+
+// DELETE /workers/deregister — worker removes itself cleanly on shutdown
+router.delete('/deregister', (req, res) => {
+  const { id } = req.body;
+  if (!id) return res.status(400).json({ error: 'Missing required field: id' });
+  const ok = deregisterWorker(id);
+  if (!ok) return res.status(404).json({ error: 'Worker not found' });
+  res.json({ ok: true });
 });
 
 module.exports = router;
