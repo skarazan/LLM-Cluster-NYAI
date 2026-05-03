@@ -1,5 +1,32 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
+
+let mainWindow;
+
+// --- Auto-update wiring (uses GitHub Releases as the update server) ---
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
+
+autoUpdater.on('update-available', (info) => {
+  if (mainWindow) mainWindow.webContents.send('update-status', { state: 'downloading', version: info.version });
+});
+
+autoUpdater.on('update-downloaded', async (info) => {
+  if (mainWindow) mainWindow.webContents.send('update-status', { state: 'ready', version: info.version });
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    buttons: ['Restart now', 'Later'],
+    defaultId: 0,
+    title: 'Update ready',
+    message: `Version ${info.version} downloaded. Restart to install?`,
+  });
+  if (choice.response === 0) autoUpdater.quitAndInstall();
+});
+
+autoUpdater.on('error', (err) => {
+  console.error('Updater error:', err);
+});
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -17,9 +44,16 @@ function createWindow() {
 
   win.loadFile('renderer/index.html');
   win.setMenuBarVisibility(false);
+  mainWindow = win;
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  // Check for updates 3s after launch (skip in dev where app isn't packaged)
+  if (app.isPackaged) {
+    setTimeout(() => autoUpdater.checkForUpdates().catch(console.error), 3000);
+  }
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

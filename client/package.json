@@ -5,9 +5,12 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win --x64"
+    "build": "electron-builder --win --x64",
+    "release": "electron-builder --win --x64 --publish always"
   },
-  "dependencies": {},
+  "dependencies": {
+    "electron-updater": "^6.8.3"
+  },
   "devDependencies": {
     "electron": "^29.0.0",
     "electron-builder": "^24.0.0"
@@ -15,6 +18,11 @@
   "build": {
     "appId": "com.llmcluster.client",
     "productName": "LLM Cluster Chat",
+    "publish": {
+      "provider": "github",
+      "owner": "skarazan",
+      "repo": "LLM-Cluster-NYAI"
+    },
     "win": {
       "target": "nsis"
     },
