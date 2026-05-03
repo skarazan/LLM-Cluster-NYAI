@@ -1,12 +1,15 @@
 {
   "name": "llm-cluster-client",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Chat client for LLM Cluster",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win --x64",
-    "release": "electron-builder --win --x64 --publish always"
+    "build": "electron-builder",
+    "build:win": "electron-builder --win --x64",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "release": "electron-builder --publish always"
   },
   "dependencies": {
     "electron-updater": "^6.8.3"
@@ -29,6 +32,17 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] }
+      ],
+      "category": "public.app-category.productivity",
+      "identity": null
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Network"
     },
     "files": [
       "main.js",
