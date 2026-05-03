@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>LLM Cluster Chat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">LLM Cluster Chat</div>
+    <div class="connection">
+      <label for="backend-url">Manager URL:</label>
+      <input id="backend-url" type="text" placeholder="http://192.168.1.x:3000" />
+      <select id="model">
+        <option value="llama3">llama3</option>
+      </select>
+      <button id="ping-btn">Test</button>
+      <span id="status-dot" class="dot dot-unknown" title="not tested"></span>
+    </div>
+  </header>
+
+  <main id="chat" class="chat"></main>
+
+  <footer>
+    <textarea id="input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="2"></textarea>
+    <button id="send-btn">Send</button>
+  </footer>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

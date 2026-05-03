@@ -1,0 +1,30 @@
+{
+  "name": "llm-cluster-client",
+  "version": "1.0.0",
+  "description": "Chat client for LLM Cluster",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.llmcluster.client",
+    "productName": "LLM Cluster Chat",
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "files": [
+      "main.js",
+      "renderer/**/*"
+    ]
+  }
+}
