@@ -60,15 +60,15 @@ function getAllWorkers() {
   return Array.from(workers.values());
 }
 
-async function sendPromptToWorker(worker, prompt, model) {
+async function sendPromptToWorker(worker, messages, model) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
 
   try {
-    const res = await fetch(`${worker.url}/api/generate`, {
+    const res = await fetch(`${worker.url}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt, stream: false }),
+      body: JSON.stringify({ model, messages, stream: false }),
       signal: controller.signal,
     });
 
@@ -77,7 +77,10 @@ async function sendPromptToWorker(worker, prompt, model) {
     }
 
     const data = await res.json();
-    return data.response;
+    if (!data.message || typeof data.message.content !== 'string') {
+      throw new Error(`Worker ${worker.name} returned unexpected response shape (missing message.content)`);
+    }
+    return data.message.content;
   } finally {
     clearTimeout(timer);
   }

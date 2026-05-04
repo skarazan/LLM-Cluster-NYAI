@@ -4,10 +4,10 @@ const { getNextWorker, sendPromptToWorker } = require('../services/workerService
 
 // POST /chat — each request gets its own worker, own response, own error handling
 router.post('/', async (req, res) => {
-  const { prompt, model = 'llama3' } = req.body;
+  const { messages, model = 'llama3' } = req.body;
 
-  if (!prompt) {
-    return res.status(400).json({ error: 'Missing required field: prompt' });
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: 'Missing required field: messages (must be a non-empty array)' });
   }
 
   const worker = getNextWorker();
@@ -16,7 +16,7 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    const response = await sendPromptToWorker(worker, prompt, model);
+    const response = await sendPromptToWorker(worker, messages, model);
     res.json({ worker: worker.name, model, response });
   } catch (err) {
     if (err.name === 'AbortError') {
