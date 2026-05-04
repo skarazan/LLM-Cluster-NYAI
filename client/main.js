@@ -1,31 +1,32 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
-const { autoUpdater } = require('electron-updater');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 
 let mainWindow;
 
-// --- Auto-update wiring (uses GitHub Releases as the update server) ---
-autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
+const RELEASES_URL = 'https://github.com/skarazan/LLM-Cluster-NYAI/releases/latest';
+const RELEASES_API = 'https://api.github.com/repos/skarazan/LLM-Cluster-NYAI/releases/latest';
 
-autoUpdater.on('update-available', (info) => {
-  if (mainWindow) mainWindow.webContents.send('update-status', { state: 'downloading', version: info.version });
-});
+// --- Update check: compare current version against latest GitHub release ---
+async function checkForUpdates() {
+  if (!app.isPackaged) return;
+  try {
+    const res = await fetch(RELEASES_API, {
+      headers: { 'User-Agent': 'LLM-Cluster-Chat' },
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const latest = (data.tag_name || '').replace(/^v/, '');
+    const current = app.getVersion();
+    if (latest && latest !== current) {
+      if (mainWindow) mainWindow.webContents.send('update-available', { version: latest });
+    }
+  } catch (err) {
+    console.error('[updater] check failed:', err.message);
+  }
+}
 
-autoUpdater.on('update-downloaded', async (info) => {
-  if (mainWindow) mainWindow.webContents.send('update-status', { state: 'ready', version: info.version });
-  const choice = await dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    buttons: ['Restart now', 'Later'],
-    defaultId: 0,
-    title: 'Update ready',
-    message: `Version ${info.version} downloaded. Restart to install?`,
-  });
-  if (choice.response === 0) autoUpdater.quitAndInstall();
-});
-
-autoUpdater.on('error', (err) => {
-  console.error('Updater error:', err);
+ipcMain.on('open-releases', () => {
+  shell.openExternal(RELEASES_URL);
 });
 
 function createWindow() {
@@ -49,10 +50,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
-  // Check for updates 3s after launch (skip in dev where app isn't packaged)
-  if (app.isPackaged) {
-    setTimeout(() => autoUpdater.checkForUpdates().catch(console.error), 3000);
-  }
+  setTimeout(checkForUpdates, 3000);
 });
 
 app.on('window-all-closed', () => {

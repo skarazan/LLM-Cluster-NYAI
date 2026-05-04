@@ -1,5 +1,18 @@
 const { ipcRenderer } = require('electron');
 
+// --- Update banner ---
+const updateBanner  = document.getElementById('update-banner');
+const updateMsg     = document.getElementById('update-msg');
+const updateBtn     = document.getElementById('update-btn');
+const updateDismiss = document.getElementById('update-dismiss');
+
+ipcRenderer.on('update-available', (_, { version }) => {
+  updateMsg.textContent = `Update available: v${version}`;
+  updateBanner.classList.remove('hidden');
+});
+updateBtn.addEventListener('click', () => ipcRenderer.send('open-releases'));
+updateDismiss.addEventListener('click', () => updateBanner.classList.add('hidden'));
+
 const urlInput = document.getElementById('backend-url');
 const modelSelect = document.getElementById('model');
 const pingBtn = document.getElementById('ping-btn');
