@@ -1,6 +1,10 @@
 'use strict';
 
 const { randomUUID } = require('crypto');
+const { exec }       = require('child_process');
+const util           = require('util');
+const os             = require('os');
+const execP          = util.promisify(exec);
 
 const OLLAMA_TIMEOUT_MS = 300000; // 5 min — slow CPU inference
 const HEARTBEAT_TTL_MS  = 30000;  // 30s — worker expires if silent
@@ -9,6 +13,40 @@ const SWEEP_INTERVAL_MS = 10000;  // 10s — how often to evict stale workers
 // In-memory registry: workerID -> worker object
 const workers = new Map();
 let currentIndex = 0;
+
+// ---------- Dev-only: ensure Ollama + llama3 present on local machine ----------
+
+async function ensureOllamaAndLlama3() {
+  if (process.env.NODE_ENV === 'production') return;
+
+  try {
+    await execP('ollama --version');
+    console.log('[setup] ollama CLI detected');
+  } catch {
+    console.warn('[setup] ollama not found on PATH — install from https://ollama.com');
+    return;
+  }
+
+  let modelsOutput = '';
+  for (const cmd of ['ollama list', 'ollama ls']) {
+    try { ({ stdout: modelsOutput } = await execP(cmd)); break; } catch { /* try next */ }
+  }
+
+  if (modelsOutput.toLowerCase().includes('llama3')) {
+    console.log('[setup] llama3 already present');
+    return;
+  }
+
+  console.log('[setup] pulling llama3 (this may take a while)...');
+  try {
+    await execP('ollama pull llama3', { timeout: 0 });
+    console.log('[setup] llama3 pulled');
+  } catch (e) {
+    console.error('[setup] pull failed:', e.message);
+  }
+}
+
+ensureOllamaAndLlama3().catch(err => console.error('[setup] error:', err));
 
 // ---------- Registry lifecycle ----------
 
