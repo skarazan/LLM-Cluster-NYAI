@@ -11,9 +11,7 @@
     "build:linux": "electron-builder --linux",
     "release": "electron-builder --publish always"
   },
-  "dependencies": {
-    "electron-updater": "^6.8.3"
-  },
+  "dependencies": {},
   "devDependencies": {
     "electron": "^41.5.0",
     "electron-builder": "^26.8.1"
