@@ -3,6 +3,7 @@ const { ipcRenderer } = require('electron');
 const urlInput = document.getElementById('backend-url');
 const modelSelect = document.getElementById('model');
 const pingBtn = document.getElementById('ping-btn');
+const newChatBtn = document.getElementById('new-chat-btn');
 const statusDot = document.getElementById('status-dot');
 const chat = document.getElementById('chat');
 const input = document.getElementById('input');
@@ -10,6 +11,9 @@ const sendBtn = document.getElementById('send-btn');
 
 const STORAGE_KEY = 'llm-cluster-backend-url';
 urlInput.value = localStorage.getItem(STORAGE_KEY) || 'http://localhost:3000';
+
+// In-memory conversation history — cleared on "New Chat"
+let history = [];
 
 urlInput.addEventListener('change', () => {
   localStorage.setItem(STORAGE_KEY, urlInput.value.trim());
@@ -53,6 +57,8 @@ async function send() {
   const backendUrl = urlInput.value.trim();
   const model = modelSelect.value;
 
+  history.push({ role: 'user', content: prompt });
+
   appendBubble('user', prompt);
   input.value = '';
   sendBtn.disabled = true;
@@ -60,20 +66,29 @@ async function send() {
   const placeholder = appendBubble('assistant', 'thinking…');
   placeholder.classList.add('loading');
 
-  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, prompt, model });
+  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: history, model });
   placeholder.remove();
 
   if (r.ok) {
     appendBubble('assistant', r.data.response, `${r.data.worker} · ${r.data.model}`);
+    history.push({ role: 'assistant', content: r.data.response });
   } else {
     appendBubble('error', `Error: ${r.error}`);
+    history.pop(); // roll back optimistic user push
   }
   sendBtn.disabled = false;
   input.focus();
 }
 
+function newChat() {
+  history = [];
+  chat.innerHTML = '';
+  input.focus();
+}
+
 sendBtn.addEventListener('click', send);
 pingBtn.addEventListener('click', ping);
+newChatBtn.addEventListener('click', newChat);
 
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {

@@ -73,12 +73,12 @@ ipcMain.handle('ping-backend', async (event, { backendUrl }) => {
 });
 
 // Forward chat requests from renderer to backend (avoids CORS issues)
-ipcMain.handle('send-prompt', async (event, { backendUrl, prompt, model }) => {
+ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model }) => {
   try {
     const res = await fetch(`${backendUrl}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, model }),
+      body: JSON.stringify({ messages, model }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
