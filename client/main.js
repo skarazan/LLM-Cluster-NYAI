@@ -8,7 +8,6 @@ const RELEASES_API = 'https://api.github.com/repos/skarazan/LLM-Cluster-NYAI/rel
 
 // --- Update check: compare current version against latest GitHub release ---
 async function checkForUpdates() {
-  if (!app.isPackaged) return;
   try {
     const res = await fetch(RELEASES_API, {
       headers: { 'User-Agent': 'LLM-Cluster-Chat' },
