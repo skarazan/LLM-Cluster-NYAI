@@ -15,8 +15,8 @@
     "electron-updater": "^6.8.3"
   },
   "devDependencies": {
-    "electron": "^29.0.0",
-    "electron-builder": "^24.0.0"
+    "electron": "^41.5.0",
+    "electron-builder": "^26.8.1"
   },
   "build": {
     "appId": "com.llmcluster.client",
@@ -35,13 +35,21 @@
     },
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["x64", "arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "category": "public.app-category.productivity",
       "identity": null
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Network"
     },
     "files": [
