@@ -181,7 +181,7 @@ async function main() {
 
   // Determine capacity
   const cores      = os.cpus().length;
-  const maxThreads = config.maxThreads    || Math.max(2, cores - 2);
+  const maxThreads = config.maxThreads    || Math.max(2, Math.floor(cores / 2));
   const maxConcurrent = config.maxConcurrent || 1;
   const capacity   = { cores, maxThreads, maxConcurrent };
 
