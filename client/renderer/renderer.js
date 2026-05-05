@@ -13,20 +13,29 @@ ipcRenderer.on('update-available', (_, { version }) => {
 updateBtn.addEventListener('click', () => ipcRenderer.send('open-releases'));
 updateDismiss.addEventListener('click', () => updateBanner.classList.add('hidden'));
 
-const urlInput = document.getElementById('backend-url');
-const modelSelect = document.getElementById('model');
-const pingBtn = document.getElementById('ping-btn');
-const newChatBtn = document.getElementById('new-chat-btn');
-const statusDot = document.getElementById('status-dot');
-const chat = document.getElementById('chat');
-const input = document.getElementById('input');
-const sendBtn = document.getElementById('send-btn');
+// --- DOM refs ---
+const urlInput        = document.getElementById('backend-url');
+const discoverBtn     = document.getElementById('discover-btn');
+const discoveredSel   = document.getElementById('discovered');
+const modelSelect     = document.getElementById('model');
+const pingBtn         = document.getElementById('ping-btn');
+const newChatBtn      = document.getElementById('new-chat-btn');
+const statusDot       = document.getElementById('status-dot');
+const sessionTokensEl = document.getElementById('session-tokens');
+const chat            = document.getElementById('chat');
+const input           = document.getElementById('input');
+const sendBtn         = document.getElementById('send-btn');
 
 const STORAGE_KEY = 'llm-cluster-backend-url';
-urlInput.value = localStorage.getItem(STORAGE_KEY) || 'http://localhost:3000';
+urlInput.value = localStorage.getItem(STORAGE_KEY) || '';
 
 // In-memory conversation history — cleared on "New Chat"
 let history = [];
+let sessionTokens = { prompt: 0, response: 0 };
+
+function updateSessionTokensDisplay() {
+  sessionTokensEl.textContent = `in: ${sessionTokens.prompt} · out: ${sessionTokens.response}`;
+}
 
 urlInput.addEventListener('change', () => {
   localStorage.setItem(STORAGE_KEY, urlInput.value.trim());
@@ -64,6 +73,46 @@ async function ping() {
   setStatus(r.ok ? 'online' : 'offline');
 }
 
+// --- mDNS Discovery ---
+
+async function discover() {
+  discoverBtn.disabled = true;
+  discoverBtn.textContent = '...';
+  const managers = await ipcRenderer.invoke('discover-managers');
+  discoverBtn.disabled = false;
+  discoverBtn.textContent = 'Discover';
+
+  if (managers.length === 0) {
+    discoveredSel.classList.add('hidden');
+    return;
+  }
+
+  if (managers.length === 1) {
+    urlInput.value = managers[0].url;
+    localStorage.setItem(STORAGE_KEY, managers[0].url);
+    discoveredSel.classList.add('hidden');
+    ping();
+    return;
+  }
+
+  // Multiple managers found — show dropdown
+  discoveredSel.innerHTML = managers.map(m =>
+    `<option value="${m.url}">${m.name} (${m.url})</option>`
+  ).join('');
+  discoveredSel.classList.remove('hidden');
+}
+
+discoverBtn.addEventListener('click', discover);
+
+discoveredSel.addEventListener('change', () => {
+  urlInput.value = discoveredSel.value;
+  localStorage.setItem(STORAGE_KEY, discoveredSel.value);
+  discoveredSel.classList.add('hidden');
+  ping();
+});
+
+// --- Chat ---
+
 async function send() {
   const prompt = input.value.trim();
   if (!prompt) return;
@@ -83,8 +132,22 @@ async function send() {
   placeholder.remove();
 
   if (r.ok) {
-    appendBubble('assistant', r.data.response, `${r.data.worker} · ${r.data.model}`);
+    const tok = r.data.tokens;
+    let meta = `${r.data.worker} · ${r.data.model}`;
+    if (tok) {
+      meta += ` · in ${tok.prompt} / out ${tok.response} tok`;
+      if (tok.tokensPerSec !== null && tok.tokensPerSec !== undefined) {
+        meta += ` · ${tok.tokensPerSec} tok/s`;
+      }
+    }
+    appendBubble('assistant', r.data.response, meta);
     history.push({ role: 'assistant', content: r.data.response });
+
+    if (tok) {
+      sessionTokens.prompt   += tok.prompt   || 0;
+      sessionTokens.response += tok.response || 0;
+      updateSessionTokensDisplay();
+    }
   } else {
     appendBubble('error', `Error: ${r.error}`);
     history.pop(); // roll back optimistic user push
@@ -95,6 +158,8 @@ async function send() {
 
 function newChat() {
   history = [];
+  sessionTokens = { prompt: 0, response: 0 };
+  updateSessionTokensDisplay();
   chat.innerHTML = '';
   input.focus();
 }
@@ -110,4 +175,9 @@ input.addEventListener('keydown', e => {
   }
 });
 
-ping(); // auto-test on launch
+// On launch: auto-discover if no URL saved, otherwise ping existing
+if (!localStorage.getItem(STORAGE_KEY)) {
+  discover();
+} else {
+  ping();
+}

@@ -16,19 +16,19 @@ router.get('/', (req, res) => {
 
 // POST /workers/register — worker self-registers on startup
 router.post('/register', (req, res) => {
-  const { name, ip, port, models } = req.body;
+  const { name, ip, port, models, capacity, version } = req.body;
   if (!name || !ip) {
     return res.status(400).json({ error: 'Missing required fields: name, ip' });
   }
-  const id = registerWorker({ name, ip, port, models });
+  const id = registerWorker({ name, ip, port, models, capacity, version });
   res.status(201).json({ id });
 });
 
 // POST /workers/heartbeat — worker keeps its registration alive
 router.post('/heartbeat', (req, res) => {
-  const { id } = req.body;
+  const { id, metrics } = req.body;
   if (!id) return res.status(400).json({ error: 'Missing required field: id' });
-  const ok = refreshHeartbeat(id);
+  const ok = refreshHeartbeat(id, metrics);
   if (!ok) return res.status(404).json({ error: 'Worker not found' });
   res.json({ ok: true });
 });

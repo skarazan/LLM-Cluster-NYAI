@@ -169,6 +169,22 @@ footer button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 #new-chat-btn:hover:not(:disabled) { background: #2c2e3e; }
 
+.session-tokens {
+  font-size: 11px;
+  color: #565f89;
+  white-space: nowrap;
+}
+
+.connection button.secondary {
+  background: transparent;
+  border: 1px solid #2c2e3e;
+  color: #c0caf5;
+  font-weight: 400;
+}
+.connection button.secondary:hover { background: #2c2e3e; }
+
+.connection select.hidden { display: none; }
+
 .update-banner {
   display: flex;
   align-items: center;

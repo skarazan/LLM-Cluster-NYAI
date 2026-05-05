@@ -11,12 +11,15 @@
     <div class="connection">
       <label for="backend-url">Manager URL:</label>
       <input id="backend-url" type="text" placeholder="http://192.168.1.x:3000" />
+      <button id="discover-btn" class="secondary">Discover</button>
+      <select id="discovered" class="hidden"></select>
       <select id="model">
         <option value="llama3">llama3</option>
       </select>
       <button id="ping-btn">Test</button>
       <span id="status-dot" class="dot dot-unknown" title="not tested"></span>
     </div>
+    <div id="session-tokens" class="session-tokens">in: 0 · out: 0</div>
   </header>
 
   <div id="update-banner" class="update-banner hidden">

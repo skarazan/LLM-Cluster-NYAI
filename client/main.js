@@ -84,3 +84,21 @@ ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model }) => 
     return { ok: false, error: err.message };
   }
 });
+
+// mDNS discovery — browse for managers on the LAN for up to 2.5s
+ipcMain.handle('discover-managers', async () => {
+  try {
+    const { Bonjour } = require('bonjour-service');
+    const b = new Bonjour();
+    return await new Promise((resolve) => {
+      const found = [];
+      const browser = b.find({ type: 'llmcluster' }, (svc) => {
+        const addr = (svc.addresses || []).find(a => /^\d+\.\d+\.\d+\.\d+$/.test(a));
+        if (addr) found.push({ name: svc.name, url: `http://${addr}:${svc.port}` });
+      });
+      setTimeout(() => { browser.stop(); b.destroy(); resolve(found); }, 2500);
+    });
+  } catch {
+    return [];
+  }
+});

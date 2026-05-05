@@ -12,7 +12,6 @@ const SWEEP_INTERVAL_MS = 10000;  // 10s — how often to evict stale workers
 
 // In-memory registry: workerID -> worker object
 const workers = new Map();
-let currentIndex = 0;
 
 // ---------- Dev-only: ensure Ollama + llama3 present on local machine ----------
 
@@ -50,12 +49,25 @@ ensureOllamaAndLlama3().catch(err => console.error('[setup] error:', err));
 
 // ---------- Registry lifecycle ----------
 
-function registerWorker({ name, ip, port = 11434, models = [] }) {
+const DEFAULT_CAPACITY = { cores: 4, maxThreads: 2, maxConcurrent: 1 };
+
+function registerWorker({ name, ip, port = 11434, models = [], capacity, version }) {
   const id     = randomUUID();
   const url    = `http://${ip}:${port}`;
-  const worker = { id, name, url, models, lastSeen: Date.now(), status: 'online' };
+  const worker = {
+    id,
+    name,
+    url,
+    models,
+    lastSeen: Date.now(),
+    status: 'online',
+    capacity: capacity || DEFAULT_CAPACITY,
+    metrics: { cpuPct: 0, loadAvg1: 0 },
+    inflight: 0,
+    version: version || '1.0',
+  };
   workers.set(id, worker);
-  console.log(`[registry] registered: ${name} (${url}) id=${id}`);
+  console.log(`[registry] registered: ${name} (${url}) id=${id} threads=${worker.capacity.maxThreads}`);
   return id;
 }
 
@@ -66,11 +78,25 @@ function deregisterWorker(id) {
   return had;
 }
 
-function refreshHeartbeat(id) {
+function refreshHeartbeat(id, metrics) {
   const worker = workers.get(id);
   if (!worker) return false;
   worker.lastSeen = Date.now();
+  if (metrics) {
+    worker.metrics.cpuPct   = metrics.cpuPct   ?? worker.metrics.cpuPct;
+    worker.metrics.loadAvg1 = metrics.loadAvg1 ?? worker.metrics.loadAvg1;
+  }
   return true;
+}
+
+function incInflight(id) {
+  const w = workers.get(id);
+  if (w) w.inflight++;
+}
+
+function decInflight(id) {
+  const w = workers.get(id);
+  if (w && w.inflight > 0) w.inflight--;
 }
 
 // Background sweep — evict workers that have gone silent
@@ -84,19 +110,46 @@ setInterval(() => {
   }
 }, SWEEP_INTERVAL_MS);
 
-// ---------- Existing public interface (unchanged contract) ----------
+// ---------- Worker selection ----------
 
-function getNextWorker() {
+function pickWorker(model, exclude = new Set()) {
   if (workers.size === 0) return null;
-  const online = Array.from(workers.values());
-  const worker = online[currentIndex % online.length];
-  currentIndex = (currentIndex + 1) % online.length;
-  return worker;
+
+  let candidates = Array.from(workers.values()).filter(w => !exclude.has(w.id));
+  if (candidates.length === 0) return null;
+
+  // Filter by model if the worker has a model list; skip filter if list is empty (old worker)
+  const modelFiltered = candidates.filter(w =>
+    w.models.length === 0 || w.models.some(m => m.startsWith(model))
+  );
+  if (modelFiltered.length > 0) candidates = modelFiltered;
+
+  // Prefer non-saturated workers; if all saturated fall through to least-loaded
+  const available = candidates.filter(w => w.inflight < w.capacity.maxConcurrent);
+  const pool = available.length > 0 ? available : candidates;
+
+  // Sort: lowest load ratio → lowest cpu% → lowest loadAvg1
+  pool.sort((a, b) => {
+    const ratioA = a.inflight / a.capacity.maxConcurrent;
+    const ratioB = b.inflight / b.capacity.maxConcurrent;
+    if (ratioA !== ratioB) return ratioA - ratioB;
+    if (a.metrics.cpuPct !== b.metrics.cpuPct) return a.metrics.cpuPct - b.metrics.cpuPct;
+    return a.metrics.loadAvg1 - b.metrics.loadAvg1;
+  });
+
+  return pool[0];
+}
+
+// Backward-compat alias
+function getNextWorker() {
+  return pickWorker('');
 }
 
 function getAllWorkers() {
   return Array.from(workers.values());
 }
+
+// ---------- Ollama call ----------
 
 async function sendPromptToWorker(worker, messages, model) {
   const controller = new AbortController();
@@ -106,7 +159,12 @@ async function sendPromptToWorker(worker, messages, model) {
     const res = await fetch(`${worker.url}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: false }),
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false,
+        options: { num_thread: worker.capacity.maxThreads },
+      }),
       signal: controller.signal,
     });
 
@@ -118,7 +176,18 @@ async function sendPromptToWorker(worker, messages, model) {
     if (!data.message || typeof data.message.content !== 'string') {
       throw new Error(`Worker ${worker.name} returned unexpected response shape (missing message.content)`);
     }
-    return data.message.content;
+
+    return {
+      content: data.message.content,
+      tokens: {
+        prompt:       data.prompt_eval_count || 0,
+        response:     data.eval_count        || 0,
+        total:        (data.prompt_eval_count || 0) + (data.eval_count || 0),
+        tokensPerSec: data.eval_duration
+          ? Math.round((data.eval_count / (data.eval_duration / 1e9)) * 10) / 10
+          : null,
+      },
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -128,6 +197,9 @@ module.exports = {
   registerWorker,
   deregisterWorker,
   refreshHeartbeat,
+  incInflight,
+  decInflight,
+  pickWorker,
   getNextWorker,
   getAllWorkers,
   sendPromptToWorker,
