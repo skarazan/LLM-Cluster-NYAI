@@ -27,7 +27,8 @@ const input           = document.getElementById('input');
 const sendBtn         = document.getElementById('send-btn');
 
 const STORAGE_KEY = 'llm-cluster-backend-url';
-urlInput.value = localStorage.getItem(STORAGE_KEY) || '';
+const DEFAULT_URL  = 'https://llm.tutorrev.live';
+urlInput.value = localStorage.getItem(STORAGE_KEY) || DEFAULT_URL;
 
 // In-memory conversation history — cleared on "New Chat"
 let history = [];
@@ -175,9 +176,5 @@ input.addEventListener('keydown', e => {
   }
 });
 
-// On launch: auto-discover if no URL saved, otherwise ping existing
-if (!localStorage.getItem(STORAGE_KEY)) {
-  discover();
-} else {
-  ping();
-}
+// On launch: ping the default/saved URL
+ping();

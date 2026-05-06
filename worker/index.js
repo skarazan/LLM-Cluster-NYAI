@@ -70,14 +70,10 @@ async function getManagerUrl(config) {
     return found[0];
   }
 
-  // 5. Interactive prompt
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question('Manager URL (e.g. http://192.168.1.100:3000): ', (answer) => {
-      rl.close();
-      resolve(answer.trim().replace(/\/$/, ''));
-    });
-  });
+  // 5. Default public URL
+  const defaultUrl = 'https://llm.tutorrev.live';
+  console.log(`[discovery] Using default manager URL: ${defaultUrl}`);
+  return defaultUrl;
 }
 
 // ---------- Ollama helpers ----------
