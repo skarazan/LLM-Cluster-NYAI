@@ -7,6 +7,8 @@ const {
   registerWorker,
   deregisterWorker,
   refreshHeartbeat,
+  pollForJob,
+  submitJobResult,
 } = require('../services/workerService');
 
 // GET /workers — lists all registered workers
@@ -39,6 +41,20 @@ router.delete('/deregister', (req, res) => {
   if (!id) return res.status(400).json({ error: 'Missing required field: id' });
   const ok = deregisterWorker(id);
   if (!ok) return res.status(404).json({ error: 'Worker not found' });
+  res.json({ ok: true });
+});
+
+// GET /workers/poll/:id — worker long-polls for a job (pull-based dispatch)
+router.get('/poll/:id', (req, res) => {
+  pollForJob(req.params.id, res);
+});
+
+// POST /workers/result — worker submits completed job result
+router.post('/result', (req, res) => {
+  const { jobId, result, error } = req.body;
+  if (!jobId) return res.status(400).json({ error: 'Missing jobId' });
+  const ok = submitJobResult(jobId, result, error);
+  if (!ok) return res.status(404).json({ error: 'Job not found or already timed out' });
   res.json({ ok: true });
 });
 

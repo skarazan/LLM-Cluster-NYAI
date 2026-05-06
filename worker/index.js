@@ -1,9 +1,8 @@
 'use strict';
 
-const readline = require('readline');
-const os       = require('os');
-const fs       = require('fs');
-const path     = require('path');
+const os   = require('os');
+const fs   = require('fs');
+const path = require('path');
 const { getCpuPct } = require('./lib/cpuSampler');
 
 const OLLAMA_URL      = 'http://localhost:11434';
@@ -24,53 +23,32 @@ function loadConfig() {
   return {};
 }
 
-// ---------- Manager URL discovery ----------
+// ---------- Manager URL ----------
 
-async function discoverManager() {
+async function getManagerUrl(config) {
+  if (process.argv[2]) return process.argv[2].replace(/\/$/, '');
+  if (process.env.LLM_MANAGER_URL) return process.env.LLM_MANAGER_URL.replace(/\/$/, '');
+  if (config.preferredManager) return config.preferredManager.replace(/\/$/, '');
+
+  // mDNS discovery
   try {
     const { Bonjour } = require('bonjour-service');
     const b = new Bonjour();
-    return await new Promise((resolve) => {
-      const found = [];
+    const found = await new Promise((resolve) => {
+      const list = [];
       const browser = b.find({ type: 'llmcluster' }, (svc) => {
         const addr = (svc.addresses || []).find(a => /^\d+\.\d+\.\d+\.\d+$/.test(a));
-        if (addr) found.push(`http://${addr}:${svc.port}`);
+        if (addr) list.push(`http://${addr}:${svc.port}`);
       });
-      setTimeout(() => {
-        browser.stop();
-        b.destroy();
-        resolve(found);
-      }, 3000);
+      setTimeout(() => { browser.stop(); b.destroy(); resolve(list); }, 3000);
     });
-  } catch {
-    return [];
-  }
-}
+    if (found.length >= 1) {
+      console.log(`[discovery] Found manager via mDNS: ${found[0]}`);
+      return found[0];
+    }
+  } catch { /* bonjour not available */ }
 
-async function getManagerUrl(config) {
-  // 1. CLI arg
-  if (process.argv[2]) return process.argv[2].replace(/\/$/, '');
-
-  // 2. Env var
-  if (process.env.LLM_MANAGER_URL) return process.env.LLM_MANAGER_URL.replace(/\/$/, '');
-
-  // 3. Config file preferred manager
-  if (config.preferredManager) return config.preferredManager.replace(/\/$/, '');
-
-  // 4. mDNS discovery
-  console.log('[discovery] Searching for manager on LAN (3s)...');
-  const found = await discoverManager();
-  if (found.length === 1) {
-    console.log(`[discovery] Found manager: ${found[0]}`);
-    return found[0];
-  }
-  if (found.length > 1) {
-    console.log(`[discovery] Found ${found.length} managers: ${found.join(', ')}`);
-    console.log(`[discovery] Using first: ${found[0]}`);
-    return found[0];
-  }
-
-  // 5. Default public URL
+  // Default public URL
   const defaultUrl = 'https://llm.tutorrev.live';
   console.log(`[discovery] Using default manager URL: ${defaultUrl}`);
   return defaultUrl;
@@ -132,41 +110,116 @@ async function register(managerUrl, name, ip, models, capacity) {
 }
 
 async function sendHeartbeat(managerUrl, id) {
-  // Sample CPU once per heartbeat
-  getCpuPct(); // warm first call discarded; real value used below after 1s
+  getCpuPct();
   await new Promise(r => setTimeout(r, 1000));
   const cpuPct   = getCpuPct();
   const loadAvg1 = os.loadavg()[0];
-
   try {
     const res = await fetch(`${managerUrl}/workers/heartbeat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, metrics: { cpuPct, loadAvg1 } }),
     });
-    if (!res.ok) {
-      console.warn(`[heartbeat] manager responded ${res.status} — will retry`);
-    }
+    if (!res.ok) console.warn(`[heartbeat] manager responded ${res.status}`);
   } catch (err) {
-    console.warn(`[heartbeat] failed to reach manager: ${err.message} — will retry`);
+    console.warn(`[heartbeat] failed: ${err.message}`);
   }
 }
 
 async function deregister(managerUrl, id) {
   try {
-    const res = await fetch(`${managerUrl}/workers/deregister`, {
+    await fetch(`${managerUrl}/workers/deregister`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
     });
-    if (res.ok) {
-      console.log('Deregistered from manager. Goodbye.');
-    } else {
-      console.warn(`Deregister responded HTTP ${res.status} — manager will expire the entry in 30s.`);
-    }
+    console.log('Deregistered from manager. Goodbye.');
   } catch (err) {
     console.warn(`Could not reach manager to deregister: ${err.message}`);
-    console.warn('Manager will expire the entry in 30s.');
+  }
+}
+
+// ---------- Job execution ----------
+
+async function runJob(job, maxThreads) {
+  const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: job.model,
+      messages: job.messages,
+      stream: false,
+      options: { num_thread: maxThreads },
+    }),
+  });
+
+  if (!res.ok) throw new Error(`Ollama returned HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.message?.content) throw new Error('Unexpected Ollama response shape');
+
+  return {
+    content: data.message.content,
+    tokens: {
+      prompt:       data.prompt_eval_count || 0,
+      response:     data.eval_count        || 0,
+      total:        (data.prompt_eval_count || 0) + (data.eval_count || 0),
+      tokensPerSec: data.eval_duration
+        ? Math.round((data.eval_count / (data.eval_duration / 1e9)) * 10) / 10
+        : null,
+    },
+  };
+}
+
+// ---------- Poll loop ----------
+
+async function pollLoop(managerUrl, id, maxThreads) {
+  while (true) {
+    let data;
+    try {
+      const res = await fetch(`${managerUrl}/workers/poll/${id}`, {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (res.status === 404) {
+        console.error('[poll] Manager says worker not found — re-registering...');
+        return; // exits poll loop, main() will re-register
+      }
+      if (!res.ok) {
+        console.warn(`[poll] manager responded ${res.status} — retrying in 5s`);
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
+      }
+      data = await res.json();
+    } catch (err) {
+      console.warn(`[poll] fetch failed: ${err.message} — retrying in 5s`);
+      await new Promise(r => setTimeout(r, 5000));
+      continue;
+    }
+
+    if (!data.job) continue; // no job, poll again immediately
+
+    const job = data.job;
+    console.log(`[job] received jobId=${job.id} model=${job.model}`);
+
+    let result = null;
+    let error  = null;
+    try {
+      result = await runJob(job, maxThreads);
+      console.log(`[job] completed jobId=${job.id} tokens=${result.tokens.total}`);
+    } catch (err) {
+      error = err.message;
+      console.error(`[job] failed jobId=${job.id}: ${err.message}`);
+    }
+
+    // Post result back
+    try {
+      await fetch(`${managerUrl}/workers/result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id, result, error }),
+      });
+    } catch (err) {
+      console.error(`[job] failed to submit result: ${err.message}`);
+    }
   }
 }
 
@@ -175,11 +228,10 @@ async function deregister(managerUrl, id) {
 async function main() {
   const config = loadConfig();
 
-  // Determine capacity
-  const cores      = os.cpus().length;
-  const maxThreads = config.maxThreads    || Math.max(2, Math.floor(cores / 2));
+  const cores         = os.cpus().length;
+  const maxThreads    = config.maxThreads    || Math.max(2, Math.floor(cores / 2));
   const maxConcurrent = config.maxConcurrent || 1;
-  const capacity   = { cores, maxThreads, maxConcurrent };
+  const capacity      = { cores, maxThreads, maxConcurrent };
 
   const managerUrl = await getManagerUrl(config);
   const models     = await getLocalModels();
@@ -191,8 +243,7 @@ async function main() {
   console.log(`Registering as "${name}" (${ip}) with manager at ${managerUrl} ...`);
 
   const id = await register(managerUrl, name, ip, models, capacity);
-
-  console.log('Registered with manager. Sending heartbeats... (Ctrl+C to stop)');
+  console.log(`Registered (id=${id}). Polling for jobs... (Ctrl+C to stop)`);
 
   const heartbeatTimer = setInterval(() => sendHeartbeat(managerUrl, id), HEARTBEAT_EVERY);
 
@@ -205,6 +256,8 @@ async function main() {
 
   process.on('SIGINT',  shutdown);
   process.on('SIGTERM', shutdown);
+
+  await pollLoop(managerUrl, id, maxThreads);
 }
 
 main();
