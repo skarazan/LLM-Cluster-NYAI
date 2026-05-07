@@ -188,13 +188,13 @@ function dispatchToWorker(worker, jobId) {
         maxThreads: worker.capacity.maxThreads,
       };
       if (job.tools) jobPayload.tools = job.tools;
-      waiter.res.json({ job: jobPayload });
+      waiter.sendJob(jobPayload);
       console.log(`[dispatch] sent jobId=${jobId} to waiter on worker=${worker.name}`);
       return;
     }
   }
   // No waiter available — job stays in pendingJobs.
-  // Worker will pick it up on next poll via the pendingJobs scan (lines 209-221).
+  // Worker will pick it up on next poll via the pendingJobs scan.
   console.log(`[dispatch] no waiter for worker=${worker.name}, job=${jobId} queued — worker picks up on next poll`);
 }
 
@@ -224,22 +224,41 @@ function pollForJob(workerId, res) {
     }
   }
 
-  // No job yet — long-poll: hold the connection for up to 15s
-  // (must be shorter than Cloudflare's ~30s upstream timeout)
+  // No job yet — long-poll. Use chunked Transfer-Encoding with periodic newline
+  // keepalives so Cloudflare doesn't buffer or drop the idle connection.
+  // Same pattern as /chat in chatRoutes.js.
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  const keepalive = setInterval(() => {
+    try { res.write('\n'); } catch { /* connection closed */ }
+  }, 5000);
+
   const POLL_TIMEOUT = 15000;
-  const waiter = { res, timedOut: false };
+  const waiter = {
+    res,
+    timedOut: false,
+    sendJob(payload) {
+      clearInterval(keepalive);
+      res.end(JSON.stringify({ job: payload }));
+    },
+    sendNoJob() {
+      clearInterval(keepalive);
+      res.end(JSON.stringify({ job: null }));
+    },
+  };
   worker.waiters.push(waiter);
 
   const t = setTimeout(() => {
     waiter.timedOut = true;
     const idx = worker.waiters.indexOf(waiter);
     if (idx !== -1) worker.waiters.splice(idx, 1);
-    res.json({ job: null }); // no job, worker should poll again
+    waiter.sendNoJob();
   }, POLL_TIMEOUT);
 
   // Clean up timer if connection drops
   res.on('close', () => {
     clearTimeout(t);
+    clearInterval(keepalive);
     waiter.timedOut = true;
     const idx = worker.waiters.indexOf(waiter);
     if (idx !== -1) worker.waiters.splice(idx, 1);

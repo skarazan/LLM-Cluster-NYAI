@@ -209,7 +209,10 @@ async function pollLoop(managerUrl, id, maxThreads, numGpu) {
         await new Promise(r => setTimeout(r, 5000));
         continue;
       }
-      data = await res.json();
+      // Body may have leading newlines from chunked-encoding keepalives.
+      const text = await res.text();
+      const trimmed = text.trimStart();
+      data = trimmed ? JSON.parse(trimmed) : { job: null };
     } catch (err) {
       console.warn(`[poll] fetch failed: ${err.message} — retrying in 5s`);
       await new Promise(r => setTimeout(r, 5000));
@@ -267,6 +270,7 @@ async function main() {
   console.log(`Registering as "${name}" (${ip}) with manager at ${managerUrl} ...`);
 
   const id = await register(managerUrl, name, ip, models, capacity);
+  console.log(`[worker] v2.2 — chunked-keepalive poll`);
   console.log(`Registered (id=${id}). Polling for jobs... (Ctrl+C to stop)`);
 
   const heartbeatTimer = setInterval(() => sendHeartbeat(managerUrl, id), HEARTBEAT_EVERY);
