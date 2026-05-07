@@ -189,9 +189,17 @@ async function pollLoop(managerUrl, id, maxThreads, numGpu) {
   while (true) {
     let data;
     try {
-      const res = await fetch(`${managerUrl}/workers/poll/${id}`, {
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const controller = new AbortController();
+      const pollTimer = setTimeout(() => controller.abort(), 20000);
+      let res;
+      try {
+        res = await fetch(`${managerUrl}/workers/poll/${id}`, {
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(pollTimer);
+      }
       if (res.status === 404) {
         console.error('[poll] Manager says worker not found — re-registering...');
         return; // exits poll loop, main() will re-register
