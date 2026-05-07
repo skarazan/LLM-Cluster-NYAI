@@ -7,7 +7,7 @@ const execP          = util.promisify(exec);
 
 const HEARTBEAT_TTL_MS  = 30000;
 const SWEEP_INTERVAL_MS = 10000;
-const JOB_TIMEOUT_MS    = 300000; // 5 min
+const JOB_TIMEOUT_MS    = 900000; // 15 min — large num_ctx + slow models need this
 
 // In-memory registry
 const workers = new Map();

@@ -232,12 +232,14 @@ async function sendChat(prompt) {
       if (tok.tokensPerSec != null) meta += ` · ${tok.tokensPerSec} tok/s`;
     }
     let raw = r.data.response || '';
-    // Extract and show thinking blocks before stripping them
-    const thinkMatches = [...raw.matchAll(/<think>([\s\S]*?)<\/think>/g)];
+    // Extract and show thinking blocks before stripping them.
+    // Match <think>, <thinking>, <reasoning> — all variants emitted by qwen3 / r1 / o1-style models.
+    const thinkRe = /<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/g;
+    const thinkMatches = [...raw.matchAll(thinkRe)];
     if (thinkMatches.length > 0) {
-      const thinkText = thinkMatches.map(m => m[1].trim()).join('\n\n---\n\n');
+      const thinkText = thinkMatches.map(m => m[2].trim()).join('\n\n---\n\n');
       appendThinkingBlock(thinkText);
-      raw = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+      raw = raw.replace(thinkRe, '').trim();
     }
     const resp = raw || '';
     appendBubble('assistant', resp, meta);

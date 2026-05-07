@@ -76,14 +76,15 @@ RULES — follow exactly:
 
     const data = r.data;
 
-    // Extract and display <think>...</think> blocks (qwen3 thinking mode) before stripping them.
+    // Extract and display thinking blocks (qwen3/r1/o1 variants) before stripping.
     if (data.response) {
-      const thinkMatches = [...data.response.matchAll(/<think>([\s\S]*?)<\/think>/g)];
+      const thinkRe = /<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/g;
+      const thinkMatches = [...data.response.matchAll(thinkRe)];
       if (thinkMatches.length > 0) {
-        const thinkText = thinkMatches.map(m => m[1].trim()).join('\n\n---\n\n');
+        const thinkText = thinkMatches.map(m => m[2].trim()).join('\n\n---\n\n');
         appendThinkingBlock(chat, thinkText);
       }
-      data.response = data.response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+      data.response = data.response.replace(thinkRe, '').trim();
     }
     if ((!data.tool_calls || data.tool_calls.length === 0) && data.response) {
       const extracted = extractToolCallsFromText(data.response, history);
