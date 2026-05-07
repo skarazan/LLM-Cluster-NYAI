@@ -4,7 +4,7 @@ const { ipcRenderer }   = require('electron');
 const { buildApprovalCard } = require('../renderer/components/approvalCard');
 const { getTool }       = require('./tools');
 
-const MAX_TOOL_CALLS = 8;
+const MAX_TOOL_CALLS = 25;
 
 // Tools that can never be auto-approved or remembered
 const ALWAYS_CONFIRM = new Set(['delete_file', 'run_shell']);

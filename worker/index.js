@@ -142,14 +142,14 @@ async function deregister(managerUrl, id) {
 
 // ---------- Job execution ----------
 
-async function runJob(job, maxThreads) {
+async function runJob(job, maxThreads, numGpu) {
   const messages = wrapMessages(job.messages, job.tools);
 
   const body = {
     model: job.model,
     messages,
     stream: false,
-    options: { num_thread: maxThreads },
+    options: { num_thread: maxThreads, num_gpu: numGpu },
   };
   if (job.tools && job.tools.length > 0) body.tools = job.tools;
 
@@ -185,7 +185,7 @@ async function runJob(job, maxThreads) {
 
 // ---------- Poll loop ----------
 
-async function pollLoop(managerUrl, id, maxThreads) {
+async function pollLoop(managerUrl, id, maxThreads, numGpu) {
   while (true) {
     let data;
     try {
@@ -216,7 +216,7 @@ async function pollLoop(managerUrl, id, maxThreads) {
     let result = null;
     let error  = null;
     try {
-      result = await runJob(job, maxThreads);
+      result = await runJob(job, maxThreads, numGpu);
       console.log(`[job] completed jobId=${job.id} tokens=${result.tokens.total}`);
     } catch (err) {
       error = err.message;
@@ -244,6 +244,9 @@ async function main() {
   const cores         = os.cpus().length;
   const maxThreads    = config.maxThreads    || Math.max(2, Math.floor(cores / 2));
   const maxConcurrent = config.maxConcurrent || 1;
+  // num_gpu: layers to offload to GPU. -1 = all layers (full GPU), 0 = CPU only.
+  // Default 999 so Ollama offloads as many layers as VRAM allows.
+  const numGpu        = config.numGpu !== undefined ? config.numGpu : 999;
   const capacity      = { cores, maxThreads, maxConcurrent };
 
   const managerUrl = await getManagerUrl(config);
@@ -252,7 +255,7 @@ async function main() {
   const name       = config.name || os.hostname();
 
   console.log(`Detected ${models.length} model(s): ${models.join(', ') || '(none)'}`);
-  console.log(`Capacity: ${cores} cores → maxThreads=${maxThreads}, maxConcurrent=${maxConcurrent}`);
+  console.log(`Capacity: ${cores} cores → maxThreads=${maxThreads}, maxConcurrent=${maxConcurrent}, numGpu=${numGpu}`);
   console.log(`Registering as "${name}" (${ip}) with manager at ${managerUrl} ...`);
 
   const id = await register(managerUrl, name, ip, models, capacity);
@@ -270,7 +273,7 @@ async function main() {
   process.on('SIGINT',  shutdown);
   process.on('SIGTERM', shutdown);
 
-  await pollLoop(managerUrl, id, maxThreads);
+  await pollLoop(managerUrl, id, maxThreads, numGpu);
 }
 
 main();
