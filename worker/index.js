@@ -148,7 +148,7 @@ async function runJob(job, maxThreads, numCtx) {
   // Let Ollama auto-decide GPU offload based on available VRAM.
   // Setting num_gpu manually risks OOM (too high) or slow inference (too low).
   // num_ctx: token window. Default Ollama is 2-4k which is too small for
-  // multi-tool agentic flows (file reads + history). 16k fits typical work.
+  // multi-tool agentic flows (file reads + history). 32k handles most.
   const body = {
     model: job.model,
     messages,
@@ -262,7 +262,7 @@ async function main() {
   const cores         = os.cpus().length;
   const maxThreads    = config.maxThreads    || Math.max(2, Math.floor(cores / 2));
   const maxConcurrent = config.maxConcurrent || 1;
-  const numCtx        = config.numCtx        || 16384;
+  const numCtx        = config.numCtx        || 32768;
   const capacity      = { cores, maxThreads, maxConcurrent };
 
   const managerUrl = await getManagerUrl(config);
