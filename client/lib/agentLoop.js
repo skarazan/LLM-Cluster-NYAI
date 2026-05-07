@@ -37,9 +37,19 @@ async function runAgentTurn(opts) {
   // Prepend a system message so the model knows the workspace root
   // Replace or insert at index 0
   let history = [...messages];
+  const toolNames = tools.map(t => t.function?.name || t.name).join(', ');
   const systemMsg = {
     role: 'system',
-    content: `You are a coding assistant with access to tools. The user's workspace is: ${workspace}\nAll file paths you use in tool calls must be relative to this workspace root or use this absolute path as the base. Never use placeholder paths like "/path/to/file". Always use real paths within the workspace.`,
+    content: `You are a coding assistant. You have access to tools: ${toolNames}.
+
+CRITICAL RULES:
+- ALWAYS call tools directly using the tool call mechanism. NEVER write tool call JSON in your text response.
+- NEVER say "I would use write_file" or show code blocks with tool JSON. Just CALL the tool.
+- The workspace root is: ${workspace}
+- ALL file paths in tool calls must use this exact workspace root as the base directory.
+- For write_file, the path must look like: ${workspace}/filename.txt
+- NEVER use placeholder paths. NEVER use /path/to/ or ~/Desktop/project/ unless that IS the workspace.
+- Complete the task by actually calling tools. Do not explain what you will do, just do it.`,
   };
   if (history.length > 0 && history[0].role === 'system') {
     history = [systemMsg, ...history.slice(1)];
@@ -66,6 +76,17 @@ async function runAgentTurn(opts) {
 
     const data = r.data;
 
+    // Fallback: model sometimes dumps tool call JSON as plain text instead of using tool_calls field.
+    // Try to extract and convert it so the loop still works.
+    if ((!data.tool_calls || data.tool_calls.length === 0) && data.response) {
+      const extracted = extractToolCallsFromText(data.response);
+      if (extracted.length > 0) {
+        data.tool_calls = extracted;
+        // Strip the JSON from response so it's not shown as text
+        data.response = '';
+      }
+    }
+
     // No tool calls — final text response
     if (!data.tool_calls || data.tool_calls.length === 0) {
       const tok = data.tokens;
@@ -77,12 +98,12 @@ async function runAgentTurn(opts) {
       appendBubble('assistant', data.response, meta);
       history.push({ role: 'assistant', content: data.response });
       // Strip the injected system message before returning — renderer stores clean history
-      return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant with access to tools.')));
+      return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant.')));
     }
 
     // Has tool calls — show approval cards and execute
-    // Append assistant's tool_calls turn to history
-    history.push({ role: 'assistant', content: data.response || '', tool_calls: data.tool_calls });
+    // Append assistant's tool_calls turn to history (suppress response text — it's often the raw JSON or a preamble)
+    history.push({ role: 'assistant', content: '', tool_calls: data.tool_calls });
 
     if (toolCallCount >= MAX_TOOL_CALLS) {
       appendBubble('error', `Reached tool call limit (${MAX_TOOL_CALLS}) per turn. Stopping.`);
@@ -129,6 +150,16 @@ async function runAgentTurn(opts) {
       let toolResult;
       if (approved) {
         toolResult = await ipcRenderer.invoke('agent:run-tool', { tool: toolName, args, workspace });
+        // Surface errors visibly so the user can see what went wrong
+        if (!toolResult.ok) {
+          appendBubble('error', `Tool "${toolName}" failed: ${toolResult.error}`);
+        } else {
+          // Show a brief success confirmation for write/shell tools
+          const writingTools = ['write_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell'];
+          if (writingTools.includes(toolName)) {
+            appendBubble('assistant', `✓ ${toolResult.result || toolName + ' completed'}`);
+          }
+        }
       } else {
         toolResult = { ok: false, error: 'User declined this tool call.' };
       }
@@ -182,6 +213,76 @@ function showApprovalCard({ chat, toolName, args, risk, call, remembered }) {
     chat.appendChild(card);
     chat.scrollTop = chat.scrollHeight;
   });
+}
+
+/**
+ * Some models (llama3.1) dump tool call JSON as plain text instead of using tool_calls.
+ * This parser finds those and converts them into the standard tool_calls format.
+ * Handles patterns like:
+ *   {"name": "write_file", "parameters": {...}}
+ *   [{"name": "write_file", "arguments": {...}}]
+ *   <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+ */
+function extractToolCallsFromText(text) {
+  const calls = [];
+  let idCounter = 0;
+
+  // Pattern 1: <tool_call>...</tool_call> tags
+  const tagMatches = [...text.matchAll(/<tool_call>([\s\S]*?)<\/tool_call>/g)];
+  for (const m of tagMatches) {
+    try {
+      const obj = JSON.parse(m[1].trim());
+      if (obj.name && (obj.arguments || obj.parameters)) {
+        calls.push({
+          id: `fallback_${idCounter++}`,
+          function: { name: obj.name, arguments: obj.arguments || obj.parameters },
+        });
+      }
+    } catch { /* not valid JSON */ }
+  }
+
+  if (calls.length > 0) return calls;
+
+  // Pattern 2: extract all balanced JSON objects from the text, then check each
+  const objects = extractJsonObjects(text);
+  for (const obj of objects) {
+    if (obj.name && (obj.arguments || obj.parameters)) {
+      calls.push({
+        id: `fallback_${idCounter++}`,
+        function: { name: obj.name, arguments: obj.arguments || obj.parameters },
+      });
+    }
+  }
+
+  return calls;
+}
+
+/** Extract all top-level balanced JSON objects from a string. */
+function extractJsonObjects(text) {
+  const results = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '{') {
+      // Find the matching closing brace
+      let depth = 0;
+      let j = i;
+      while (j < text.length) {
+        if (text[j] === '{') depth++;
+        else if (text[j] === '}') { depth--; if (depth === 0) break; }
+        j++;
+      }
+      if (depth === 0) {
+        try {
+          const obj = JSON.parse(text.slice(i, j + 1));
+          results.push(obj);
+        } catch { /* not valid JSON */ }
+        i = j + 1;
+        continue;
+      }
+    }
+    i++;
+  }
+  return results;
 }
 
 module.exports = { runAgentTurn };

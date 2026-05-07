@@ -38,6 +38,9 @@ function isDeniedAbsolute(resolved) {
 function resolveSafe(workspaceRoot, p) {
   if (!workspaceRoot) return { ok: false, error: 'No workspace selected. Click "Workspace" in the header to choose a folder.' };
 
+  // Normalize workspace root (strip trailing sep)
+  workspaceRoot = workspaceRoot.replace(/[/\\]+$/, '');
+
   // Expand ~ shorthand
   if (p.startsWith('~/')) p = path.join(os.homedir(), p.slice(2));
 

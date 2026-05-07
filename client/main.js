@@ -104,6 +104,7 @@ ipcMain.handle('agent:choose-workspace', async () => {
 
 // ── Agent: execute a tool in the main process (sandboxed) ───────────────────
 ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
+  console.log(`[tool] ${tool} workspace="${workspace}" args=${JSON.stringify(args)}`);
   const toolDef = getTool(tool);
   if (!toolDef) return { ok: false, error: `Unknown tool: ${tool}` };
 
@@ -209,6 +210,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         return { ok: false, error: `Tool "${tool}" not implemented.` };
     }
   } catch (err) {
+    console.error(`[tool] ${tool} threw: ${err.message}`);
     return { ok: false, error: err.message };
   }
 });
