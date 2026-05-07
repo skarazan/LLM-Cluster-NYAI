@@ -105,7 +105,10 @@ approvalSel.addEventListener('change', () => {
 stopBtn.addEventListener('click', () => {
   abortRef.aborted = true;
   stopBtn.classList.add('hidden');
-  sendBtn.disabled = false;
+  // sendBtn stays disabled until runAgentTurn resolves — prevents
+  // sending a second prompt while the old request is still in-flight.
+  // Show a status hint so the user knows we're waiting for the server.
+  appendBubble('error', '[Stopping… waiting for server response to complete]');
 });
 
 // Apply stored mode on load

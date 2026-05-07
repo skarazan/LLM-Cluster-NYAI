@@ -128,8 +128,13 @@ RULES — follow exactly:
     }
 
     // Has tool calls — show approval cards and execute
-    // Append assistant's tool_calls turn to history (suppress response text — it's often the raw JSON or a preamble)
-    history.push({ role: 'assistant', content: '', tool_calls: data.tool_calls });
+    // If model also sent commentary text alongside tool calls, render it as a bubble
+    const commentary = (data.response || '').trim();
+    if (commentary) {
+      appendBubble('assistant', commentary);
+    }
+    // Append assistant's tool_calls turn to history (content set to commentary or empty)
+    history.push({ role: 'assistant', content: commentary, tool_calls: data.tool_calls });
 
     if (toolCallCount >= MAX_TOOL_CALLS) {
       appendBubble('error', `Reached tool call limit (${MAX_TOOL_CALLS}) per turn. Stopping.`);
