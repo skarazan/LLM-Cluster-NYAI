@@ -3,7 +3,8 @@
 const os   = require('os');
 const fs   = require('fs');
 const path = require('path');
-const { getCpuPct } = require('./lib/cpuSampler');
+const { getCpuPct }    = require('./lib/cpuSampler');
+const { wrapMessages } = require('./lib/toolPromptWrap');
 
 const OLLAMA_URL      = 'http://localhost:11434';
 const HEARTBEAT_EVERY = 15_000; // 15s
@@ -142,23 +143,33 @@ async function deregister(managerUrl, id) {
 // ---------- Job execution ----------
 
 async function runJob(job, maxThreads) {
+  const messages = wrapMessages(job.messages, job.tools);
+
+  const body = {
+    model: job.model,
+    messages,
+    stream: false,
+    options: { num_thread: maxThreads },
+  };
+  if (job.tools && job.tools.length > 0) body.tools = job.tools;
+
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: job.model,
-      messages: job.messages,
-      stream: false,
-      options: { num_thread: maxThreads },
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) throw new Error(`Ollama returned HTTP ${res.status}`);
   const data = await res.json();
-  if (!data.message?.content) throw new Error('Unexpected Ollama response shape');
 
-  return {
-    content: data.message.content,
+  // Ollama may return tool_calls instead of (or alongside) message.content
+  const toolCalls = data.message?.tool_calls || null;
+  const content   = data.message?.content || '';
+
+  if (!toolCalls && !content) throw new Error('Unexpected Ollama response shape');
+
+  const result = {
+    content,
     tokens: {
       prompt:       data.prompt_eval_count || 0,
       response:     data.eval_count        || 0,
@@ -168,6 +179,8 @@ async function runJob(job, maxThreads) {
         : null,
     },
   };
+  if (toolCalls) result.tool_calls = toolCalls;
+  return result;
 }
 
 // ---------- Poll loop ----------

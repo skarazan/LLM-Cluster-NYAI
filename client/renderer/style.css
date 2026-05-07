@@ -185,6 +185,107 @@ footer button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .connection select.hidden { display: none; }
 
+/* ── Mode toggle ──────────────────────────────────────────────────────────── */
+.mode-toggle {
+  display: flex;
+  border: 1px solid #2c2e3e;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mode-btn {
+  padding: 5px 14px;
+  background: transparent;
+  border: none;
+  color: #c0caf5;
+  font-size: 13px;
+  cursor: pointer;
+}
+.mode-btn:hover { background: #2c2e3e; }
+.mode-btn.active {
+  background: #7aa2f7;
+  color: #1a1b26;
+  font-weight: 600;
+}
+
+/* ── Code-mode controls ───────────────────────────────────────────────────── */
+.code-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.code-controls.hidden { display: none; }
+
+.stop-btn {
+  padding: 5px 12px;
+  background: #f7768e;
+  color: #1a1b26;
+  border: none;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+  font-size: 13px;
+}
+.stop-btn:hover { background: #ff9ea8; }
+.stop-btn.hidden { display: none; }
+
+/* ── Approval cards ───────────────────────────────────────────────────────── */
+.bubble.approval {
+  background: #1e2030;
+  border: 1px solid #e0af68;
+  align-self: flex-start;
+  max-width: 85%;
+}
+.approval-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #e0af68;
+  margin-bottom: 6px;
+}
+.approval-icon { font-size: 16px; }
+.approval-meta {
+  color: #7aa2f7;
+  font-family: monospace;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.approval-preview {
+  background: #16161e;
+  border: 1px solid #2c2e3e;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: monospace;
+  overflow-x: auto;
+  white-space: pre;
+  margin-bottom: 10px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.approval-btn {
+  padding: 5px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid;
+}
+.approval-btn.approve   { background: #9ece6a22; border-color: #9ece6a; color: #9ece6a; }
+.approval-btn.approve:hover   { background: #9ece6a44; }
+.approval-btn.remember  { background: #7aa2f722; border-color: #7aa2f7; color: #7aa2f7; }
+.approval-btn.remember:hover  { background: #7aa2f744; }
+.approval-btn.reject    { background: #f7768e22; border-color: #f7768e; color: #f7768e; }
+.approval-btn.reject:hover    { background: #f7768e44; }
+.approval-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 .update-banner {
   display: flex;
   align-items: center;

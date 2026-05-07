@@ -6,7 +6,7 @@ const { pickWorker, incInflight, decInflight, sendPromptToWorker } = require('..
 
 // POST /chat — smart worker selection with retry/failover (max 3 attempts)
 router.post('/', async (req, res) => {
-  const { messages, model = 'llama3' } = req.body;
+  const { messages, model = 'llama3', tools } = req.body;
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Missing required field: messages (must be a non-empty array)' });
@@ -23,7 +23,7 @@ router.post('/', async (req, res) => {
     let result = null;
 
     try {
-      result = await sendPromptToWorker(worker, messages, model);
+      result = await sendPromptToWorker(worker, messages, model, tools);
     } catch (err) {
       decInflight(worker.id);
       if (err.name === 'AbortError') {
@@ -34,14 +34,16 @@ router.post('/', async (req, res) => {
     }
 
     decInflight(worker.id);
-    return res.json({
+    const resp = {
       worker: worker.name,
       model,
       response: result.content,
       tokens: result.tokens,
       ms: Date.now() - t0,
       attempt,
-    });
+    };
+    if (result.tool_calls) resp.tool_calls = result.tool_calls;
+    return res.json(resp);
   }
 
   if (tried.size === 0) {

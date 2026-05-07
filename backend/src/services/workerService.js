@@ -154,7 +154,7 @@ function getAllWorkers()  { return Array.from(workers.values()); }
 // ---------- Pull-based job dispatch ----------
 
 // Called by chatRoutes: push a job and wait for the worker to run it
-function sendPromptToWorker(worker, messages, model) {
+function sendPromptToWorker(worker, messages, model, tools) {
   return new Promise((resolve, reject) => {
     const jobId = randomUUID();
 
@@ -166,7 +166,7 @@ function sendPromptToWorker(worker, messages, model) {
       reject(err);
     }, JOB_TIMEOUT_MS);
 
-    pendingJobs.set(jobId, { resolve, reject, timer, model, messages, workerId: worker.id });
+    pendingJobs.set(jobId, { resolve, reject, timer, model, messages, tools, workerId: worker.id });
 
     // Dispatch immediately to a waiting poller, or it will be picked up on next poll
     dispatchToWorker(worker, jobId);
@@ -182,14 +182,14 @@ function dispatchToWorker(worker, jobId) {
     const waiter = worker.waiters.shift();
     // Check waiter hasn't timed out
     if (!waiter.timedOut) {
-      waiter.res.json({
-        job: {
-          id: jobId,
-          model: job.model,
-          messages: job.messages,
-          maxThreads: worker.capacity.maxThreads,
-        }
-      });
+      const jobPayload = {
+        id: jobId,
+        model: job.model,
+        messages: job.messages,
+        maxThreads: worker.capacity.maxThreads,
+      };
+      if (job.tools) jobPayload.tools = job.tools;
+      waiter.res.json({ job: jobPayload });
       return;
     }
   }
@@ -208,14 +208,14 @@ function pollForJob(workerId, res) {
   // Check if there's already a pending job for this worker
   for (const [jobId, job] of pendingJobs) {
     if (job.workerId === workerId) {
-      res.json({
-        job: {
-          id: jobId,
-          model: job.model,
-          messages: job.messages,
-          maxThreads: worker.capacity.maxThreads,
-        }
-      });
+      const jobPayload = {
+        id: jobId,
+        model: job.model,
+        messages: job.messages,
+        maxThreads: worker.capacity.maxThreads,
+      };
+      if (job.tools) jobPayload.tools = job.tools;
+      res.json({ job: jobPayload });
       return;
     }
   }
