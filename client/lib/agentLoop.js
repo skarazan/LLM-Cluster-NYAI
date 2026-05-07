@@ -40,16 +40,16 @@ async function runAgentTurn(opts) {
   const toolNames = tools.map(t => t.function?.name || t.name).join(', ');
   const systemMsg = {
     role: 'system',
-    content: `You are a coding assistant. You have access to tools: ${toolNames}.
+    content: `You are a coding assistant with filesystem tools. Tools: ${toolNames}.
 
-CRITICAL RULES:
-- ALWAYS call tools directly using the tool call mechanism. NEVER write tool call JSON in your text response.
-- NEVER say "I would use write_file" or show code blocks with tool JSON. Just CALL the tool.
-- The workspace root is: ${workspace}
-- ALL file paths in tool calls must use this exact workspace root as the base directory.
-- For write_file, the path must look like: ${workspace}/filename.txt
-- NEVER use placeholder paths. NEVER use /path/to/ or ~/Desktop/project/ unless that IS the workspace.
-- Complete the task by actually calling tools. Do not explain what you will do, just do it.`,
+RULES — follow exactly:
+1. ALWAYS use tools to create/edit files. NEVER show file contents in chat as markdown or code blocks.
+2. When asked to create multiple files, call write_file for EACH file one by one until ALL are created.
+3. After each tool result, immediately call the next tool needed. Do NOT stop to explain.
+4. Only reply with plain text AFTER all tools have been called and the task is fully complete.
+5. Workspace root: ${workspace}
+6. ALL file paths must start with: ${workspace}/
+7. NEVER use placeholder paths like /path/to/file.`,
   };
   if (history.length > 0 && history[0].role === 'system') {
     history = [systemMsg, ...history.slice(1)];
@@ -216,12 +216,8 @@ function showApprovalCard({ chat, toolName, args, risk, call, remembered }) {
 }
 
 /**
- * Some models (llama3.1) dump tool call JSON as plain text instead of using tool_calls.
- * This parser finds those and converts them into the standard tool_calls format.
- * Handles patterns like:
- *   {"name": "write_file", "parameters": {...}}
- *   [{"name": "write_file", "arguments": {...}}]
- *   <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+ * Some models dump tool call JSON as plain text or show file contents as markdown code blocks.
+ * This parser extracts both and converts them into tool_calls format.
  */
 function extractToolCallsFromText(text) {
   const calls = [];
@@ -240,16 +236,32 @@ function extractToolCallsFromText(text) {
       }
     } catch { /* not valid JSON */ }
   }
-
   if (calls.length > 0) return calls;
 
-  // Pattern 2: extract all balanced JSON objects from the text, then check each
+  // Pattern 2: JSON objects with "name" + "arguments"/"parameters"
   const objects = extractJsonObjects(text);
   for (const obj of objects) {
     if (obj.name && (obj.arguments || obj.parameters)) {
       calls.push({
         id: `fallback_${idCounter++}`,
         function: { name: obj.name, arguments: obj.arguments || obj.parameters },
+      });
+    }
+  }
+  if (calls.length > 0) return calls;
+
+  // Pattern 3: model shows "filename.ext" followed by a markdown code block
+  // e.g. "**index.html**\n```html\n<content>\n```"
+  // Convert each to a write_file call using the filename mentioned before the block
+  const codeBlockRe = /(?:(?:\*\*|`)?([^\s`*\n]+\.[a-zA-Z0-9]+)(?:\*\*|`)?\s*\n)?```[a-zA-Z]*\n([\s\S]*?)```/g;
+  let match;
+  while ((match = codeBlockRe.exec(text)) !== null) {
+    const filename = match[1] || null;
+    const content  = match[2];
+    if (filename && content) {
+      calls.push({
+        id: `fallback_${idCounter++}`,
+        function: { name: 'write_file', arguments: { path: filename, content } },
       });
     }
   }
