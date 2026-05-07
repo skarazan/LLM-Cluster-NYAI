@@ -76,10 +76,17 @@ RULES — follow exactly:
 
     const data = r.data;
 
-    // Fallback: model sometimes dumps tool call JSON as plain text instead of using tool_calls field.
-    // Try to extract and convert it so the loop still works.
+    // Extract and display <think>...</think> blocks (qwen3 thinking mode) before stripping them.
+    if (data.response) {
+      const thinkMatches = [...data.response.matchAll(/<think>([\s\S]*?)<\/think>/g)];
+      if (thinkMatches.length > 0) {
+        const thinkText = thinkMatches.map(m => m[1].trim()).join('\n\n---\n\n');
+        appendThinkingBlock(chat, thinkText);
+      }
+      data.response = data.response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    }
     if ((!data.tool_calls || data.tool_calls.length === 0) && data.response) {
-      const extracted = extractToolCallsFromText(data.response);
+      const extracted = extractToolCallsFromText(data.response, history);
       if (extracted.length > 0) {
         data.tool_calls = extracted;
         // Strip the JSON from response so it's not shown as text
@@ -90,13 +97,32 @@ RULES — follow exactly:
     // No tool calls — final text response
     if (!data.tool_calls || data.tool_calls.length === 0) {
       const tok = data.tokens;
-      let meta = `${data.worker} · ${data.model}`;
+      const workerLabel = data.worker || 'worker';
+      const modelLabel  = data.model  || model;
+      let meta = `${workerLabel} · ${modelLabel}`;
       if (tok) {
         meta += ` · in ${tok.prompt} / out ${tok.response} tok`;
         if (tok.tokensPerSec != null) meta += ` · ${tok.tokensPerSec} tok/s`;
       }
-      appendBubble('assistant', data.response, meta);
-      history.push({ role: 'assistant', content: data.response });
+      // data.response already has <think> blocks stripped above
+      let rawResp = data.response || '';
+
+      // Skip rendering if the model just echoed back a tool result (llama3.1 quirk)
+      if (rawResp.startsWith('<tool_result') || rawResp.startsWith('<tool_response')) {
+        // Model echoed the tool result — loop again to get the actual response
+        history.push({ role: 'assistant', content: '' });
+        continue;
+      }
+
+      // Ignore nonsense one-word responses the model sometimes emits (e.g. "undefined", "null")
+      const meaningless = new Set(['undefined', 'null', 'none', '{}', '[]']);
+      const respNorm = rawResp.toLowerCase().trim();
+      const resp = meaningless.has(respNorm) ? '' : rawResp;
+
+      // If model returned empty text after completing tool calls, show a completion message
+      const displayResp = resp || (toolCallCount > 0 ? 'Done.' : '');
+      appendBubble('assistant', displayResp, meta);
+      history.push({ role: 'assistant', content: displayResp });
       // Strip the injected system message before returning — renderer stores clean history
       return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant.')));
     }
@@ -169,7 +195,14 @@ RULES — follow exactly:
           // Show a brief success confirmation for write/shell tools
           const writingTools = ['write_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell'];
           if (writingTools.includes(toolName)) {
-            appendBubble('assistant', `✓ ${toolResult.result || toolName + ' completed'}`);
+            let summary;
+            if (toolName === 'run_shell' && toolResult.result && typeof toolResult.result === 'object') {
+              const { stdout, stderr, exitCode } = toolResult.result;
+              summary = `✓ ran: exit ${exitCode ?? 0}` + (stdout ? `\n${stdout.slice(0, 300)}` : '') + (stderr ? `\nstderr: ${stderr.slice(0, 200)}` : '');
+            } else {
+              summary = `✓ ${toolResult.result || toolName + ' completed'}`;
+            }
+            appendBubble('assistant', summary);
           }
         }
       } else {
@@ -231,7 +264,7 @@ function showApprovalCard({ chat, toolName, args, risk, call, remembered }) {
  * Some models dump tool call JSON as plain text or show file contents as markdown code blocks.
  * This parser extracts both and converts them into tool_calls format.
  */
-function extractToolCallsFromText(text) {
+function extractToolCallsFromText(text, history = []) {
   const calls = [];
   let idCounter = 0;
 
@@ -262,15 +295,39 @@ function extractToolCallsFromText(text) {
   }
   if (calls.length > 0) return calls;
 
-  // Pattern 3: model shows "filename.ext" followed by a markdown code block
-  // e.g. "**index.html**\n```html\n<content>\n```"
-  // Convert each to a write_file call using the filename mentioned before the block
-  const codeBlockRe = /(?:(?:\*\*|`)?([^\s`*\n]+\.[a-zA-Z0-9]+)(?:\*\*|`)?\s*\n)?```[a-zA-Z]*\n([\s\S]*?)```/g;
+  // Pattern 3: markdown code blocks — with or without a filename before them
+  const SOURCE_EXTS = /\.(html?|css|js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|json|yaml|yml|md|txt|sh|env|toml|xml|svg)$/i;
+  const codeBlockRe = /(?:(?:\*\*|`)?([^\s`*()\n]+)(?:\*\*|`)?\s*\n)?```[a-zA-Z]*\n([\s\S]*?)```/g;
+
+  // Find last file path used in history (for inferring filename when missing)
+  let lastFilePath = null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    if (msg.role === 'tool' && msg.content) {
+      const m = msg.content.match(/"path"\s*:\s*"([^"]+)"/);
+      if (m) { lastFilePath = m[1]; break; }
+    }
+  }
+
   let match;
   while ((match = codeBlockRe.exec(text)) !== null) {
-    const filename = match[1] || null;
-    const content  = match[2];
-    if (filename && content) {
+    let filename = match[1] || null;
+    const content = match[2];
+    if (!content || content.trim().length < 10) continue;
+
+    // If no filename captured, try to infer from context
+    if (!filename || !SOURCE_EXTS.test(filename)) {
+      // Look for a filename mentioned anywhere before this code block in the text
+      const before = text.slice(0, match.index);
+      const nearby = before.match(/([^\s`*()\n]+\.(html?|css|js|ts|py|rb|go|java|c|cpp|json|yaml|yml|sh|txt))\b/gi);
+      if (nearby) {
+        filename = nearby[nearby.length - 1]; // use most recent mention
+      } else if (lastFilePath) {
+        filename = lastFilePath; // fall back to last written file
+      }
+    }
+
+    if (filename && SOURCE_EXTS.test(filename)) {
       calls.push({
         id: `fallback_${idCounter++}`,
         function: { name: 'write_file', arguments: { path: filename, content } },
@@ -307,6 +364,30 @@ function extractJsonObjects(text) {
     i++;
   }
   return results;
+}
+
+/** Render a collapsible thinking block in the chat container. */
+function appendThinkingBlock(chat, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'thinking-block';
+
+  const toggle = document.createElement('button');
+  toggle.className = 'thinking-toggle';
+  toggle.textContent = 'Thinking…';
+
+  const content = document.createElement('div');
+  content.className = 'thinking-content';
+  content.textContent = text;
+
+  toggle.addEventListener('click', () => {
+    toggle.classList.toggle('open');
+    content.classList.toggle('open');
+  });
+
+  wrap.appendChild(toggle);
+  wrap.appendChild(content);
+  chat.appendChild(wrap);
+  chat.scrollTop = chat.scrollHeight;
 }
 
 module.exports = { runAgentTurn };

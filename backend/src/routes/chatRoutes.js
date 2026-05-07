@@ -22,17 +22,27 @@ router.post('/', async (req, res) => {
     const t0 = Date.now();
     let result = null;
 
+    // Send periodic newline keepalives so Cloudflare doesn't close the connection
+    // on long-running model inference (>100s). The client reads the full body as
+    // text, trims it, then JSON.parses — leading/trailing newlines are harmless.
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    const keepalive = setInterval(() => { try { res.write('\n'); } catch { /* closed */ } }, 30000);
+
     try {
       result = await sendPromptToWorker(worker, messages, model, tools);
     } catch (err) {
+      clearInterval(keepalive);
       decInflight(worker.id);
       if (err.name === 'AbortError') {
-        return res.status(504).json({ error: `Worker ${worker.name} timed out` });
+        res.end(JSON.stringify({ error: `Worker ${worker.name} timed out` }));
+        return;
       }
       tried.add(worker.id);
       continue; // retry with next worker
     }
 
+    clearInterval(keepalive);
     decInflight(worker.id);
     const resp = {
       worker: worker.name,
@@ -43,13 +53,16 @@ router.post('/', async (req, res) => {
       attempt,
     };
     if (result.tool_calls) resp.tool_calls = result.tool_calls;
-    return res.json(resp);
+    res.end(JSON.stringify(resp));
+    return;
   }
 
   if (tried.size === 0) {
-    return res.status(503).json({ error: 'No workers online' });
+    if (!res.headersSent) res.status(503);
+    return res.end(JSON.stringify({ error: 'No workers online' }));
   }
-  return res.status(502).json({ error: 'All workers failed', tried: [...tried] });
+  if (!res.headersSent) res.status(502);
+  return res.end(JSON.stringify({ error: 'All workers failed', tried: [...tried] }));
 });
 
 module.exports = router;

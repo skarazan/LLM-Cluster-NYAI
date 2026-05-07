@@ -84,7 +84,10 @@ ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text.trim()); }
+    catch { throw new Error(`Server returned non-JSON (HTTP ${res.status}): ${text.trim().slice(0, 200)}`); }
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return { ok: true, data };
   } catch (err) {

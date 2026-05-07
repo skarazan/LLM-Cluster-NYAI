@@ -143,6 +143,25 @@ function appendBubble(role, text, meta) {
   return wrap;
 }
 
+function appendThinkingBlock(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'thinking-block';
+  const toggle = document.createElement('button');
+  toggle.className = 'thinking-toggle';
+  toggle.textContent = 'Thinking…';
+  const content = document.createElement('div');
+  content.className = 'thinking-content';
+  content.textContent = text;
+  toggle.addEventListener('click', () => {
+    toggle.classList.toggle('open');
+    content.classList.toggle('open');
+  });
+  wrap.appendChild(toggle);
+  wrap.appendChild(content);
+  chat.appendChild(wrap);
+  chat.scrollTop = chat.scrollHeight;
+}
+
 // --- mDNS Discovery ---
 
 async function discover() {
@@ -209,8 +228,17 @@ async function sendChat(prompt) {
       meta += ` · in ${tok.prompt} / out ${tok.response} tok`;
       if (tok.tokensPerSec != null) meta += ` · ${tok.tokensPerSec} tok/s`;
     }
-    appendBubble('assistant', r.data.response, meta);
-    history.push({ role: 'assistant', content: r.data.response });
+    let raw = r.data.response || '';
+    // Extract and show thinking blocks before stripping them
+    const thinkMatches = [...raw.matchAll(/<think>([\s\S]*?)<\/think>/g)];
+    if (thinkMatches.length > 0) {
+      const thinkText = thinkMatches.map(m => m[1].trim()).join('\n\n---\n\n');
+      appendThinkingBlock(thinkText);
+      raw = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    }
+    const resp = raw || '';
+    appendBubble('assistant', resp, meta);
+    history.push({ role: 'assistant', content: resp });
     if (tok) {
       sessionTokens.prompt   += tok.prompt   || 0;
       sessionTokens.response += tok.response || 0;
