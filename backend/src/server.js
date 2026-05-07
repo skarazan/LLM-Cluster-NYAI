@@ -6,7 +6,7 @@ const workerRoutes = require('./routes/workerRoutes');
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'LLM Cluster backend is running.' });
