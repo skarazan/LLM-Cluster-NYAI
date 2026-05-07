@@ -34,7 +34,19 @@ async function runAgentTurn(opts) {
     abortRef, remembered,
   } = opts;
 
+  // Prepend a system message so the model knows the workspace root
+  // Replace or insert at index 0
   let history = [...messages];
+  const systemMsg = {
+    role: 'system',
+    content: `You are a coding assistant with access to tools. The user's workspace is: ${workspace}\nAll file paths you use in tool calls must be relative to this workspace root or use this absolute path as the base. Never use placeholder paths like "/path/to/file". Always use real paths within the workspace.`,
+  };
+  if (history.length > 0 && history[0].role === 'system') {
+    history = [systemMsg, ...history.slice(1)];
+  } else {
+    history = [systemMsg, ...history];
+  }
+
   let toolCallCount = 0;
 
   while (true) {
@@ -64,7 +76,8 @@ async function runAgentTurn(opts) {
       }
       appendBubble('assistant', data.response, meta);
       history.push({ role: 'assistant', content: data.response });
-      return history;
+      // Strip the injected system message before returning — renderer stores clean history
+      return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant with access to tools.')));
     }
 
     // Has tool calls — show approval cards and execute
