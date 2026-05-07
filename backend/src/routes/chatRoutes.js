@@ -13,9 +13,11 @@ router.post('/', async (req, res) => {
   }
 
   const tried = new Set();
+  console.log(`[chat] request model=${model} workers=${require('../services/workerService').getAllWorkers().length}`);
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const worker = pickWorker(model, tried);
+    console.log(`[chat] attempt=${attempt} worker=${worker ? worker.name : 'none'} tried=${[...tried].length}`);
     if (!worker) break;
 
     incInflight(worker.id);
@@ -34,6 +36,7 @@ router.post('/', async (req, res) => {
     } catch (err) {
       clearInterval(keepalive);
       decInflight(worker.id);
+      console.log(`[chat] worker=${worker.name} error=${err.name}: ${err.message}`);
       if (err.name === 'AbortError') {
         res.end(JSON.stringify({ error: `Worker ${worker.name} timed out` }));
         return;

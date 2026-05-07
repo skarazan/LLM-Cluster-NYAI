@@ -180,7 +180,6 @@ function dispatchToWorker(worker, jobId) {
 
   while (worker.waiters.length > 0) {
     const waiter = worker.waiters.shift();
-    // Check waiter hasn't timed out
     if (!waiter.timedOut) {
       const jobPayload = {
         id: jobId,
@@ -190,10 +189,13 @@ function dispatchToWorker(worker, jobId) {
       };
       if (job.tools) jobPayload.tools = job.tools;
       waiter.res.json({ job: jobPayload });
+      console.log(`[dispatch] sent jobId=${jobId} to waiter on worker=${worker.name}`);
       return;
     }
   }
-  // No waiter available — job stays in pendingJobs, worker will pick it up on next poll
+  // No waiter available — job stays in pendingJobs.
+  // Worker will pick it up on next poll via the pendingJobs scan (lines 209-221).
+  console.log(`[dispatch] no waiter for worker=${worker.name}, job=${jobId} queued — worker picks up on next poll`);
 }
 
 // Called by workerRoutes: worker is asking for a job (long-poll)
@@ -206,8 +208,10 @@ function pollForJob(workerId, res) {
   refreshHeartbeat(workerId);
 
   // Check if there's already a pending job for this worker
+  console.log(`[poll] worker=${worker.name} pendingJobs=${pendingJobs.size}`);
   for (const [jobId, job] of pendingJobs) {
     if (job.workerId === workerId) {
+      console.log(`[poll] delivering queued job=${jobId} to worker=${worker.name}`);
       const jobPayload = {
         id: jobId,
         model: job.model,
@@ -220,8 +224,9 @@ function pollForJob(workerId, res) {
     }
   }
 
-  // No job yet — long-poll: hold the connection for up to 25s
-  const POLL_TIMEOUT = 25000;
+  // No job yet — long-poll: hold the connection for up to 15s
+  // (must be shorter than Cloudflare's ~30s upstream timeout)
+  const POLL_TIMEOUT = 15000;
   const waiter = { res, timedOut: false };
   worker.waiters.push(waiter);
 
