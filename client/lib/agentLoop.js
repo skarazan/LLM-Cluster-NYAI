@@ -150,9 +150,21 @@ RULES — follow exactly:
       let toolResult;
       if (approved) {
         toolResult = await ipcRenderer.invoke('agent:run-tool', { tool: toolName, args, workspace });
+
+        // Auto-retry: edit_file "old_string not found" → read actual content and tell model
+        if (!toolResult.ok && toolName === 'edit_file' && toolResult.error?.includes('old_string not found')) {
+          const readResult = await ipcRenderer.invoke('agent:run-tool', { tool: 'read_file', args: { path: args.path }, workspace });
+          if (readResult.ok) {
+            toolResult = {
+              ok: false,
+              error: `old_string not found. Current file content:\n${readResult.result}\n\nUse write_file to rewrite the whole file with your changes applied.`,
+            };
+          }
+        }
+
         // Surface errors visibly so the user can see what went wrong
         if (!toolResult.ok) {
-          appendBubble('error', `Tool "${toolName}" failed: ${toolResult.error}`);
+          appendBubble('error', `Tool "${toolName}" failed: ${toolResult.error.split('\n')[0]}`);
         } else {
           // Show a brief success confirmation for write/shell tools
           const writingTools = ['write_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell'];
