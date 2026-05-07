@@ -159,7 +159,10 @@ async function runJob(job, maxThreads, numGpu) {
     body: JSON.stringify(body),
   });
 
-  if (!res.ok) throw new Error(`Ollama returned HTTP ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`Ollama HTTP ${res.status}: ${errBody.slice(0, 500)}`);
+  }
   const data = await res.json();
 
   // Ollama may return tool_calls instead of (or alongside) message.content

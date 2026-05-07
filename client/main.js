@@ -49,6 +49,7 @@ function createWindow() {
 
   win.loadFile('renderer/index.html');
   win.setMenuBarVisibility(false);
+  win.webContents.openDevTools();
   mainWindow = win;
 }
 
