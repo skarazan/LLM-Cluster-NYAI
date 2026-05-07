@@ -8,10 +8,10 @@
  *   - toolName {string}
  *   - args {object}
  *   - risk {string} "read"|"write"|"shell"
- *   - onApprove {function}
- *   - onApproveRemember {function}
+ *   - onApprove {function}         — approve once
+ *   - onApproveRemember {function} — approve + remember for this conversation
  *   - onReject {function}
- *   - canRemember {boolean} — false for delete_file, run_shell, etc.
+ *   - canRemember {boolean}        — false for delete_file, run_shell
  * @returns {HTMLElement}
  */
 function buildApprovalCard({ toolName, args, risk, onApprove, onApproveRemember, onReject, canRemember = true }) {
@@ -63,7 +63,7 @@ function buildApprovalCard({ toolName, args, risk, onApprove, onApproveRemember,
   if (canRemember) {
     const btnRemember = document.createElement('button');
     btnRemember.className = 'approval-btn remember';
-    btnRemember.textContent = 'Approve + remember';
+    btnRemember.textContent = 'Always Allow';
     btnRemember.addEventListener('click', () => { lockCard(wrap); onApproveRemember(); });
     actions.appendChild(btnRemember);
   }
