@@ -41,6 +41,11 @@ function resolveSafe(workspaceRoot, p) {
   // Normalize workspace root (strip trailing sep)
   workspaceRoot = workspaceRoot.replace(/[/\\]+$/, '');
 
+  // Default undefined/null/empty path to workspace root itself
+  if (p === undefined || p === null || p === '' || p === 'undefined' || p === 'null') {
+    p = '.';
+  }
+
   // Expand ~ shorthand
   if (p.startsWith('~/')) p = path.join(os.homedir(), p.slice(2));
 

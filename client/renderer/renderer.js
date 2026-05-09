@@ -286,7 +286,7 @@ async function sendCode(prompt) {
       backendUrl,
       messages: history,
       model,
-      tools: getToolSchemas(),
+      tools: getToolSchemas(workspace),
       workspace,
       approvalMode,
       chat,

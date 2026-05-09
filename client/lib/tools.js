@@ -24,13 +24,13 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'list_dir',
-    description: 'List files and directories in a given directory inside the workspace.',
+    description: 'List files and directories in a given directory inside the workspace. Omit path to list the workspace root.',
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Directory path (relative to workspace root or absolute).' },
+        path: { type: 'string', description: 'Directory path (absolute). Defaults to workspace root if omitted.' },
       },
-      required: ['path'],
+      required: [],
     },
     risk: 'read',
   },
@@ -134,12 +134,27 @@ const TOOL_DEFINITIONS = [
   },
 ];
 
-/** Return only the Ollama-compatible shape (name, description, parameters). */
-function getToolSchemas() {
-  return TOOL_DEFINITIONS.map(({ name, description, parameters }) => ({
-    type: 'function',
-    function: { name, description, parameters },
-  }));
+/**
+ * Return OpenAI-compatible tool schemas.
+ * If workspace is provided, inject it into relevant descriptions so the model
+ * always knows the exact path to use without guessing.
+ */
+function getToolSchemas(workspace) {
+  return TOOL_DEFINITIONS.map(({ name, description, parameters }) => {
+    let desc = description;
+    if (workspace) {
+      // Patch path/root descriptions to include the actual workspace root
+      const patchedParams = JSON.parse(JSON.stringify(parameters));
+      for (const [key, val] of Object.entries(patchedParams.properties || {})) {
+        if (['path', 'root', 'cwd'].includes(key) && typeof val.description === 'string') {
+          val.description = val.description
+            + ` Workspace root is: ${workspace}. Use absolute paths starting with ${workspace}/.`;
+        }
+      }
+      return { type: 'function', function: { name, description: desc, parameters: patchedParams } };
+    }
+    return { type: 'function', function: { name, description: desc, parameters } };
+  });
 }
 
 /** Look up a tool definition by name. */
