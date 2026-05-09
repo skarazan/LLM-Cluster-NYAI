@@ -68,13 +68,62 @@ WORKFLOW RULES:
 
   let toolCallCount = 0;
 
+  // Live stream bubble — shows tokens as they arrive via IPC 'stream-chunk'
+  let activeStreamEl = null;
+  const onStreamChunk = (_, text) => {
+    if (typeof ensurePlaceholderRemoved === 'function') ensurePlaceholderRemoved();
+    if (!activeStreamEl) {
+      activeStreamEl = document.createElement('div');
+      activeStreamEl.className = 'bubble assistant';
+      const body = document.createElement('div');
+      body.className = 'bubble-body';
+      activeStreamEl.appendChild(body);
+      chat.appendChild(activeStreamEl);
+    }
+    const body = activeStreamEl.querySelector('.bubble-body');
+    // Show thinking inline with 💭 marker instead of raw tags
+    const raw = (body.dataset.raw || '') + text;
+    body.dataset.raw = raw;
+    body.textContent = raw
+      .replace(/<(think|thinking|reasoning)>\s*/g, '💭 ')
+      .replace(/\s*<\/(think|thinking|reasoning)>/g, '\n─────\n');
+    chat.scrollTop = chat.scrollHeight;
+  };
+  ipcRenderer.on('stream-chunk', onStreamChunk);
+
+  // Trim tool result content to prevent context explosion across multi-turn tool calls.
+  // Tool results (file contents etc.) can be huge; keep only the first 500 chars of old ones.
+  function trimHistory(msgs) {
+    const MAX_TOOL_RESULT_CHARS = 500;
+    const KEEP_RECENT = 4; // always keep last N tool results untruncated
+    let toolResultsSeen = 0;
+    // count total tool results first
+    const total = msgs.filter(m => m.role === 'tool').length;
+    return msgs.map(m => {
+      if (m.role !== 'tool') return m;
+      toolResultsSeen++;
+      const isRecent = toolResultsSeen > total - KEEP_RECENT;
+      if (isRecent) return m;
+      if (m.content && m.content.length > MAX_TOOL_RESULT_CHARS) {
+        return { ...m, content: m.content.slice(0, MAX_TOOL_RESULT_CHARS) + '\n…[truncated]' };
+      }
+      return m;
+    });
+  }
+
   while (true) {
     if (abortRef.aborted) break;
 
+    // Remove any previous stream bubble before starting a new request
+    if (activeStreamEl) { activeStreamEl.remove(); activeStreamEl = null; }
+
     // Send to backend
     setLoading(true);
-    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: history, model, tools });
+    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: trimHistory(history), model, tools });
     setLoading(false);
+
+    // Remove stream bubble now that we have the final response
+    if (activeStreamEl) { activeStreamEl.remove(); activeStreamEl = null; }
 
     if (abortRef.aborted) break;
 
@@ -85,13 +134,13 @@ WORKFLOW RULES:
 
     const data = r.data;
 
-    // Extract and display thinking blocks (qwen3/r1/o1 variants) before stripping.
+    // Extract thinking blocks (qwen3/r1/o1 variants) — render AFTER the response bubble.
+    let pendingThinkText = null;
     if (data.response) {
       const thinkRe = /<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/g;
       const thinkMatches = [...data.response.matchAll(thinkRe)];
       if (thinkMatches.length > 0) {
-        const thinkText = thinkMatches.map(m => m[2].trim()).join('\n\n---\n\n');
-        appendThinkingBlock(chat, thinkText);
+        pendingThinkText = thinkMatches.map(m => m[2].trim()).join('\n\n---\n\n');
       }
       data.response = data.response.replace(thinkRe, '').trim();
     }
@@ -133,6 +182,8 @@ WORKFLOW RULES:
       const displayResp = resp || (toolCallCount > 0 ? 'Done.' : '');
       appendBubble('assistant', displayResp, meta);
       history.push({ role: 'assistant', content: displayResp });
+      if (pendingThinkText) appendThinkingBlock(chat, pendingThinkText);
+      ipcRenderer.removeListener('stream-chunk', onStreamChunk);
       // Strip the injected system message before returning — renderer stores clean history
       return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant.')));
     }
@@ -238,6 +289,7 @@ WORKFLOW RULES:
     }
   }
 
+  ipcRenderer.removeListener('stream-chunk', onStreamChunk);
   return history;
 }
 

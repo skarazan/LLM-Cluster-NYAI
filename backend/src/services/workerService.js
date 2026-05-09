@@ -15,6 +15,15 @@ const workers = new Map();
 // Job queue: jobId -> { resolve, reject, timer, model, messages, workerId }
 const pendingJobs = new Map();
 
+// Streaming chunk listeners: jobId → callback(content)
+const chunkListeners = new Map();
+function addChunkListener(jobId, cb) { chunkListeners.set(jobId, cb); }
+function removeChunkListener(jobId) { chunkListeners.delete(jobId); }
+function emitChunk(jobId, content) {
+  const cb = chunkListeners.get(jobId);
+  if (cb) try { cb(content); } catch {}
+}
+
 // ---------- Dev-only setup ----------
 //
 // Manager does NOT run inference. Workers self-report their available models on
@@ -161,9 +170,9 @@ function getAllWorkers()  { return Array.from(workers.values()); }
 // ---------- Pull-based job dispatch ----------
 
 // Called by chatRoutes: push a job and wait for the worker to run it
-function sendPromptToWorker(worker, messages, model, tools) {
+function sendPromptToWorker(worker, messages, model, tools, jobId) {
+  if (!jobId) jobId = randomUUID();
   return new Promise((resolve, reject) => {
-    const jobId = randomUUID();
 
     const timer = setTimeout(() => {
       pendingJobs.delete(jobId);
@@ -300,4 +309,7 @@ module.exports = {
   sendPromptToWorker,
   pollForJob,
   submitJobResult,
+  addChunkListener,
+  removeChunkListener,
+  emitChunk,
 };

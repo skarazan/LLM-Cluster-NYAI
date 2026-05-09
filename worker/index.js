@@ -167,7 +167,7 @@ async function deregister(managerUrl, id) {
 
 // ---------- Job execution ----------
 
-async function runJob(job, engine, maxThreads, numCtx) {
+async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   const messages = wrapMessages(job.messages, job.tools);
   const startMs = Date.now();
 
@@ -252,6 +252,7 @@ async function runJob(job, engine, maxThreads, numCtx) {
         if (delta.content) {
           accumulated += delta.content;
           process.stdout.write(delta.content);
+          if (onChunk) onChunk(delta.content);
         }
 
         // tool_calls delta
@@ -348,10 +349,31 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
     const job = data.job;
     console.log(`[job] received jobId=${job.id} model=${job.model}`);
 
+    // Batched chunk forwarder — 150ms batching to avoid CF rate limits
+    let chunkBuf = '';
+    let chunkFlushTimer = null;
+    const onChunk = (content) => {
+      chunkBuf += content;
+      if (!chunkFlushTimer) {
+        chunkFlushTimer = setTimeout(async () => {
+          chunkFlushTimer = null;
+          if (!chunkBuf) return;
+          const toSend = chunkBuf; chunkBuf = '';
+          try {
+            await fetch(`${managerUrl}/workers/chunk`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ jobId: job.id, content: toSend }),
+            });
+          } catch {}
+        }, 150);
+      }
+    };
+
     let result = null;
     let error  = null;
     try {
-      result = await runJob(job, engine, maxThreads, numCtx);
+      result = await runJob(job, engine, maxThreads, numCtx, onChunk);
       console.log(`[job] completed jobId=${job.id} tokens=${result.tokens.total}`);
     } catch (err) {
       error = err.message;

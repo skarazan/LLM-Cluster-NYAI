@@ -2,7 +2,8 @@
 
 const express = require('express');
 const router  = express.Router();
-const { pickWorker, incInflight, decInflight, sendPromptToWorker } = require('../services/workerService');
+const { randomUUID } = require('crypto');
+const { pickWorker, incInflight, decInflight, sendPromptToWorker, addChunkListener, removeChunkListener } = require('../services/workerService');
 
 // POST /chat — smart worker selection with retry/failover (max 3 attempts)
 router.post('/', async (req, res) => {
@@ -31,10 +32,16 @@ router.post('/', async (req, res) => {
     res.setHeader('Transfer-Encoding', 'chunked');
     const keepalive = setInterval(() => { try { res.write('\n'); } catch { /* closed */ } }, 30000);
 
+    const jobId = randomUUID();
+    addChunkListener(jobId, (content) => {
+      try { res.write(JSON.stringify({ chunk: content }) + '\n'); } catch {}
+    });
+
     try {
-      result = await sendPromptToWorker(worker, messages, model, tools);
+      result = await sendPromptToWorker(worker, messages, model, tools, jobId);
     } catch (err) {
       clearInterval(keepalive);
+      removeChunkListener(jobId);
       decInflight(worker.id);
       console.log(`[chat] worker=${worker.name} error=${err.name}: ${err.message}`);
       if (err.name === 'AbortError') {
@@ -46,6 +53,7 @@ router.post('/', async (req, res) => {
     }
 
     clearInterval(keepalive);
+    removeChunkListener(jobId);
     decInflight(worker.id);
     const resp = {
       worker: worker.name,

@@ -9,6 +9,7 @@ const {
   refreshHeartbeat,
   pollForJob,
   submitJobResult,
+  emitChunk,
 } = require('../services/workerService');
 
 // GET /workers — lists all registered workers (strip non-serializable internals)
@@ -50,6 +51,13 @@ router.delete('/deregister', (req, res) => {
 // GET /workers/poll/:id — worker long-polls for a job (pull-based dispatch)
 router.get('/poll/:id', (req, res) => {
   pollForJob(req.params.id, res);
+});
+
+// POST /workers/chunk — worker forwards a streaming token chunk
+router.post('/chunk', (req, res) => {
+  const { jobId, content } = req.body;
+  if (jobId && content) emitChunk(jobId, content);
+  res.json({ ok: true });
 });
 
 // POST /workers/result — worker submits completed job result

@@ -76,6 +76,7 @@ ipcMain.handle('ping-backend', async (event, { backendUrl }) => {
 });
 
 // Forward chat requests from renderer to backend (avoids CORS issues)
+// Streams token chunks via IPC 'stream-chunk' events before returning the final response.
 ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools }) => {
   try {
     const body = { messages, model };
@@ -85,12 +86,37 @@ ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text.trim()); }
-    catch { throw new Error(`Server returned non-JSON (HTTP ${res.status}): ${text.trim().slice(0, 200)}`); }
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    return { ok: true, data };
+
+    const decoder = new TextDecoder();
+    let buf = '';
+    let finalData = null;
+
+    for await (const rawChunk of res.body) {
+      buf += decoder.decode(rawChunk, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop(); // keep incomplete line
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed);
+          if ('chunk' in parsed) {
+            // stream token chunk — forward to renderer
+            event.sender.send('stream-chunk', parsed.chunk);
+          } else {
+            finalData = parsed; // final full response
+          }
+        } catch {}
+      }
+    }
+    // handle any leftover in buffer
+    if (buf.trim()) {
+      try { finalData = finalData || JSON.parse(buf.trim()); } catch {}
+    }
+
+    if (!finalData) throw new Error('No response received from server');
+    if (!res.ok) throw new Error(finalData.error || `HTTP ${res.status}`);
+    return { ok: true, data: finalData };
   } catch (err) {
     return { ok: false, error: err.message };
   }
