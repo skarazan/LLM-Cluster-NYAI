@@ -200,11 +200,19 @@ async function runJob(job, engine, maxThreads, numCtx) {
     if (job.tools && job.tools.length > 0) body.tools = job.tools;
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(engine) },
-    body: JSON.stringify(body),
-  });
+  const inferenceAbort = new AbortController();
+  const inferenceTimer = setTimeout(() => inferenceAbort.abort(), 600_000); // 10 min hard cap
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(engine) },
+      body: JSON.stringify(body),
+      signal: inferenceAbort.signal,
+    });
+  } finally {
+    clearTimeout(inferenceTimer);
+  }
 
   if (!res.ok) {
     const errBody = await res.text().catch(() => '');
