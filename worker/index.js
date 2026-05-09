@@ -173,14 +173,11 @@ async function runJob(job, engine, maxThreads, numCtx) {
 
   let url, body;
   if (engine.openai) {
-    // OpenAI-compat: llama.cpp / LM Studio / vLLM.
-    // No num_thread / num_ctx in the request body — those are server-side launch flags
-    // (e.g. `llama-server -c 32768`). Server enforces the configured context window.
     url = `${engine.url}/v1/chat/completions`;
     body = {
       model: job.model,
       messages,
-      stream: false,
+      stream: true,   // stream so we can see tokens in real-time + detect crash point
       max_tokens: 8192,
       temperature: 0.7,
     };
@@ -189,7 +186,6 @@ async function runJob(job, engine, maxThreads, numCtx) {
       body.tool_choice = 'auto';
     }
   } else {
-    // Ollama native /api/chat. Auto-GPU (num_gpu omitted). num_ctx tunable.
     url = `${engine.url}/api/chat`;
     body = {
       model: job.model,
@@ -201,7 +197,7 @@ async function runJob(job, engine, maxThreads, numCtx) {
   }
 
   const inferenceAbort = new AbortController();
-  const inferenceTimer = setTimeout(() => inferenceAbort.abort(), 600_000); // 10 min hard cap
+  const inferenceTimer = setTimeout(() => inferenceAbort.abort(), 600_000);
   let res;
   try {
     res = await fetch(url, {
@@ -218,25 +214,78 @@ async function runJob(job, engine, maxThreads, numCtx) {
     const errBody = await res.text().catch(() => '');
     throw new Error(`${engine.type} HTTP ${res.status}: ${errBody.slice(0, 500)}`);
   }
-  const data = await res.json();
 
   let content, toolCalls, tokens;
+
   if (engine.openai) {
-    const choice = (data.choices && data.choices[0]) || {};
-    const msg    = choice.message || {};
-    content      = msg.content || '';
-    toolCalls    = (msg.tool_calls && msg.tool_calls.length) ? msg.tool_calls : null;
-    const usage  = data.usage || {};
+    // --- SSE stream reader ---
+    let accumulated = '';
+    const toolCallsMap = {};  // index → partial tool call
+    let promptTokens = 0, completionTokens = 0;
+
+    process.stdout.write('\n[stream] ');
+    const reader = res.body;
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    for await (const chunk of reader) {
+      buf += decoder.decode(chunk, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop(); // keep incomplete line
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') continue;
+        let evt;
+        try { evt = JSON.parse(raw); } catch { continue; }
+
+        // usage (some servers send it in last chunk)
+        if (evt.usage) {
+          promptTokens     = evt.usage.prompt_tokens     || 0;
+          completionTokens = evt.usage.completion_tokens || 0;
+        }
+
+        const delta = evt.choices?.[0]?.delta;
+        if (!delta) continue;
+
+        // content delta (thinking + response text)
+        if (delta.content) {
+          accumulated += delta.content;
+          process.stdout.write(delta.content);
+        }
+
+        // tool_calls delta
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            if (!toolCallsMap[idx]) {
+              toolCallsMap[idx] = { id: tc.id || '', type: 'function', function: { name: '', arguments: '' } };
+            }
+            const t = toolCallsMap[idx];
+            if (tc.id)                    t.id                    = tc.id;
+            if (tc.function?.name)        t.function.name        += tc.function.name;
+            if (tc.function?.arguments)   t.function.arguments   += tc.function.arguments;
+          }
+        }
+      }
+    }
+    process.stdout.write('\n[stream end]\n');
+
+    content   = accumulated;
+    const built = Object.values(toolCallsMap);
+    toolCalls = built.length ? built : null;
+
     const elapsedSec = (Date.now() - startMs) / 1000;
     tokens = {
-      prompt:       usage.prompt_tokens     || 0,
-      response:     usage.completion_tokens || 0,
-      total:        usage.total_tokens      || 0,
-      tokensPerSec: (usage.completion_tokens && elapsedSec > 0)
-        ? Math.round((usage.completion_tokens / elapsedSec) * 10) / 10
+      prompt:       promptTokens,
+      response:     completionTokens,
+      total:        promptTokens + completionTokens,
+      tokensPerSec: (completionTokens && elapsedSec > 0)
+        ? Math.round((completionTokens / elapsedSec) * 10) / 10
         : null,
     };
   } else {
+    const data = await res.json();
     toolCalls = data.message?.tool_calls || null;
     content   = data.message?.content    || '';
     tokens = {
