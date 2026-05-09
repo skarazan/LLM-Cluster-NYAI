@@ -349,25 +349,13 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
     const job = data.job;
     console.log(`[job] received jobId=${job.id} model=${job.model}`);
 
-    // Batched chunk forwarder — 150ms batching to avoid CF rate limits
-    let chunkBuf = '';
-    let chunkFlushTimer = null;
+    // Real-time chunk forwarder — fire-and-forget, no batching delay
     const onChunk = (content) => {
-      chunkBuf += content;
-      if (!chunkFlushTimer) {
-        chunkFlushTimer = setTimeout(async () => {
-          chunkFlushTimer = null;
-          if (!chunkBuf) return;
-          const toSend = chunkBuf; chunkBuf = '';
-          try {
-            await fetch(`${managerUrl}/workers/chunk`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ jobId: job.id, content: toSend }),
-            });
-          } catch {}
-        }, 150);
-      }
+      fetch(`${managerUrl}/workers/chunk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id, content }),
+      }).catch(() => {});
     };
 
     let result = null;
