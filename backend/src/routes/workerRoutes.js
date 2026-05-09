@@ -11,9 +11,12 @@ const {
   submitJobResult,
 } = require('../services/workerService');
 
-// GET /workers — lists all registered workers
+// GET /workers — lists all registered workers (strip non-serializable internals)
 router.get('/', (req, res) => {
-  res.json({ workers: getAllWorkers() });
+  const workers = getAllWorkers().map(({ id, name, ip, models, status, capacity, metrics, inflight, version, lastSeen }) => ({
+    id, name, ip, models, status, capacity, metrics, inflight, version, lastSeen,
+  }));
+  res.json({ workers });
 });
 
 // POST /workers/register — worker self-registers on startup
