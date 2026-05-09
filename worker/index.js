@@ -171,13 +171,26 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   const messages = wrapMessages(job.messages, job.tools);
   const startMs = Date.now();
 
+  // ── Debug: audit the message array being sent ──────────────────────
+  const msgSummary = messages.map((m, i) => {
+    const toolCallIds = m.tool_calls ? m.tool_calls.map(tc => tc.function?.name || tc.id).join(',') : null;
+    const toolId = m.tool_call_id || null;
+    return `  [${i}] role=${m.role}` +
+      (m.content ? ` content=${String(m.content).slice(0, 60).replace(/\n/g, '↵')}` : '') +
+      (toolCallIds ? ` tool_calls=[${toolCallIds}]` : '') +
+      (toolId ? ` tool_call_id=${toolId}` : '');
+  }).join('\n');
+  console.log(`[job] sending ${messages.length} messages to ${engine.type}:\n${msgSummary}`);
+  console.log(`[job] tools=${job.tools?.length || 0} model=${job.model}`);
+
   let url, body;
   if (engine.openai) {
     url = `${engine.url}/v1/chat/completions`;
     body = {
       model: job.model,
       messages,
-      stream: true,   // stream so we can see tokens in real-time + detect crash point
+      stream: true,
+      stream_options: { include_usage: true },  // get token counts in stream
       max_tokens: 8192,
       temperature: 0.7,
     };
@@ -196,8 +209,13 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     if (job.tools && job.tools.length > 0) body.tools = job.tools;
   }
 
+  console.log(`[job] POST ${url}`);
+
   const inferenceAbort = new AbortController();
-  const inferenceTimer = setTimeout(() => inferenceAbort.abort(), 600_000);
+  const inferenceTimer = setTimeout(() => {
+    console.error('[job] inference timeout (10 min) — aborting');
+    inferenceAbort.abort();
+  }, 600_000);
   let res;
   try {
     res = await fetch(url, {
@@ -206,12 +224,19 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       body: JSON.stringify(body),
       signal: inferenceAbort.signal,
     });
+  } catch (fetchErr) {
+    clearTimeout(inferenceTimer);
+    const reason = fetchErr.name === 'AbortError' ? 'timeout after 10 min' : fetchErr.message;
+    throw new Error(`[job] fetch to ${engine.type} failed: ${reason}`);
   } finally {
     clearTimeout(inferenceTimer);
   }
 
+  console.log(`[job] ${engine.type} responded HTTP ${res.status}`);
+
   if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
+    const errBody = await res.text().catch(() => '(unreadable)');
+    console.error(`[job] ${engine.type} error body: ${errBody.slice(0, 1000)}`);
     throw new Error(`${engine.type} HTTP ${res.status}: ${errBody.slice(0, 500)}`);
   }
 
@@ -220,8 +245,11 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   if (engine.openai) {
     // --- SSE stream reader ---
     let accumulated = '';
-    const toolCallsMap = {};  // index → partial tool call
+    const toolCallsMap = {};
     let promptTokens = 0, completionTokens = 0;
+    let finishReason = null;
+    let sseEventCount = 0;
+    let sseErrors = [];
 
     process.stdout.write('\n[stream] ');
     const reader = res.body;
@@ -231,31 +259,46 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     for await (const chunk of reader) {
       buf += decoder.decode(chunk, { stream: true });
       const lines = buf.split('\n');
-      buf = lines.pop(); // keep incomplete line
+      buf = lines.pop();
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const raw = line.slice(6).trim();
         if (raw === '[DONE]') continue;
         let evt;
-        try { evt = JSON.parse(raw); } catch { continue; }
+        try { evt = JSON.parse(raw); } catch (e) {
+          console.warn(`[stream] failed to parse SSE line: ${line.slice(0, 200)}`);
+          continue;
+        }
+        sseEventCount++;
 
-        // usage (some servers send it in last chunk)
+        // llama-server sends error events as { error: "..." }
+        if (evt.error) {
+          const errStr = typeof evt.error === 'string' ? evt.error : JSON.stringify(evt.error);
+          sseErrors.push(errStr);
+          console.error(`[stream] SSE error event: ${errStr}`);
+          continue;
+        }
+
+        // usage chunk (sent with stream_options.include_usage: true)
         if (evt.usage) {
           promptTokens     = evt.usage.prompt_tokens     || 0;
           completionTokens = evt.usage.completion_tokens || 0;
         }
 
-        const delta = evt.choices?.[0]?.delta;
+        const choice = evt.choices?.[0];
+        if (!choice) continue;
+
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+
+        const delta = choice.delta;
         if (!delta) continue;
 
-        // content delta (thinking + response text)
         if (delta.content) {
           accumulated += delta.content;
           process.stdout.write(delta.content);
           if (onChunk) onChunk(delta.content);
         }
 
-        // tool_calls delta
         if (delta.tool_calls) {
           for (const tc of delta.tool_calls) {
             const idx = tc.index ?? 0;
@@ -263,18 +306,25 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
               toolCallsMap[idx] = { id: tc.id || '', type: 'function', function: { name: '', arguments: '' } };
             }
             const t = toolCallsMap[idx];
-            if (tc.id)                    t.id                    = tc.id;
-            if (tc.function?.name)        t.function.name        += tc.function.name;
-            if (tc.function?.arguments)   t.function.arguments   += tc.function.arguments;
+            if (tc.id)                  t.id                  = tc.id;
+            if (tc.function?.name)      t.function.name      += tc.function.name;
+            if (tc.function?.arguments) t.function.arguments += tc.function.arguments;
           }
         }
       }
     }
     process.stdout.write('\n[stream end]\n');
 
+    console.log(`[stream] sseEvents=${sseEventCount} finishReason=${finishReason} contentLen=${accumulated.length} toolCallsBuilt=${Object.keys(toolCallsMap).length} promptTokens=${promptTokens} completionTokens=${completionTokens}`);
+    if (sseErrors.length) console.error(`[stream] ${sseErrors.length} SSE error(s): ${sseErrors.join(' | ')}`);
+
     content   = accumulated;
     const built = Object.values(toolCallsMap);
     toolCalls = built.length ? built : null;
+
+    if (toolCalls) {
+      console.log(`[stream] tool_calls: ${toolCalls.map(tc => `${tc.function.name}(${tc.function.arguments.slice(0, 80)})`).join(', ')}`);
+    }
 
     const elapsedSec = (Date.now() - startMs) / 1000;
     tokens = {
@@ -300,7 +350,10 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   }
 
   if (!toolCalls && !content) {
-    throw new Error(`Unexpected ${engine.type} response shape`);
+    const hint = engine.openai
+      ? 'Empty SSE stream — llama-server may have crashed on this message shape. Check server logs. Common cause: role:tool messages with --jinja enabled.'
+      : 'Empty response body from engine.';
+    throw new Error(`Unexpected ${engine.type} response shape. ${hint}`);
   }
 
   const result = { content, tokens };
