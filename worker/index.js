@@ -394,22 +394,29 @@ async function main() {
   console.log(`Capacity: ${cores} cores → maxThreads=${maxThreads}, maxConcurrent=${maxConcurrent}, ${ctxNote}`);
   console.log(`Registering as "${name}" (${ip}) with manager at ${managerUrl} ...`);
 
-  const id = await register(managerUrl, name, ip, engine.port, models, capacity);
-  console.log(`Registered (id=${id}). Polling for jobs... (Ctrl+C to stop)`);
+  let currentId = await register(managerUrl, name, ip, engine.port, models, capacity);
+  console.log(`Registered (id=${currentId}). Polling for jobs... (Ctrl+C to stop)`);
 
-  const heartbeatTimer = setInterval(() => sendHeartbeat(managerUrl, id), HEARTBEAT_EVERY);
+  const heartbeatTimer = setInterval(() => sendHeartbeat(managerUrl, currentId), HEARTBEAT_EVERY);
 
   async function shutdown() {
     console.log('\nShutting down...');
     clearInterval(heartbeatTimer);
-    await deregister(managerUrl, id);
+    await deregister(managerUrl, currentId);
     process.exit(0);
   }
 
   process.on('SIGINT',  shutdown);
   process.on('SIGTERM', shutdown);
 
-  await pollLoop(managerUrl, id, engine, maxThreads, numCtx);
+  // Auto re-register if manager evicts this worker (poll returns 404)
+  while (true) {
+    await pollLoop(managerUrl, currentId, engine, maxThreads, numCtx);
+    console.log('[worker] Evicted by manager — re-registering in 5s...');
+    await new Promise(r => setTimeout(r, 5000));
+    currentId = await register(managerUrl, name, ip, engine.port, models, capacity);
+    console.log(`[worker] Re-registered (id=${currentId}). Resuming poll...`);
+  }
 }
 
 main();

@@ -355,7 +355,7 @@ newChatBtn.addEventListener('click', newChat);
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    send();
+    if (!sendBtn.disabled) send();
   }
 });
 
