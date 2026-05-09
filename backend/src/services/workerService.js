@@ -135,8 +135,9 @@ function pickWorker(model, exclude = new Set()) {
   let candidates = Array.from(workers.values()).filter(w => !exclude.has(w.id));
   if (candidates.length === 0) return null;
 
+  const modelLower = model.toLowerCase();
   const modelFiltered = candidates.filter(w =>
-    w.models.length === 0 || w.models.some(m => m.startsWith(model))
+    w.models.length === 0 || w.models.some(m => m.toLowerCase().startsWith(modelLower))
   );
   if (modelFiltered.length > 0) candidates = modelFiltered;
 
