@@ -156,7 +156,15 @@ WORKFLOW RULES:
       toolCallCount++;
 
       const toolName = call.function?.name || call.name;
-      const args     = call.function?.arguments || call.arguments || {};
+      // llama.cpp / OpenAI format returns arguments as a JSON *string*; Ollama returns a parsed object.
+      // Always normalise to an object here.
+      let rawArgs = call.function?.arguments ?? call.arguments ?? {};
+      let args;
+      if (typeof rawArgs === 'string') {
+        try { args = JSON.parse(rawArgs); } catch { args = {}; }
+      } else {
+        args = rawArgs;
+      }
       const toolDef  = getTool(toolName);
       const risk     = toolDef ? toolDef.risk : 'write';
 
