@@ -16,8 +16,14 @@ const workers = new Map();
 const pendingJobs = new Map();
 
 // ---------- Dev-only setup ----------
+//
+// Manager does NOT run inference. Workers self-report their available models on
+// registration. The Ollama probe below is opt-in via `LLM_DEV_OLLAMA=1` for
+// developers who happen to also run Ollama locally — it never blocks startup.
+// Default behaviour: skip entirely. Set the env var to re-enable.
 
 async function ensureOllamaAndLlama3() {
+  if (process.env.LLM_DEV_OLLAMA !== '1') return;
   if (process.env.NODE_ENV === 'production') return;
   try {
     await execP('ollama --version');
