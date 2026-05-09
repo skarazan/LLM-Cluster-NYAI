@@ -42,14 +42,23 @@ async function runAgentTurn(opts) {
     role: 'system',
     content: `You are a coding assistant with filesystem tools. Tools: ${toolNames}.
 
-RULES — follow exactly:
+WORKSPACE = "${workspace}"
+
+CRITICAL PATH RULES — NEVER violate:
+- Every tool call that takes a path argument MUST use an absolute path starting with "${workspace}/"
+- list_dir root = "${workspace}" — call it as: list_dir({"path": "${workspace}"})
+- read_file example: read_file({"path": "${workspace}/src/index.js"})
+- write_file example: write_file({"path": "${workspace}/src/newfile.js", "content": "..."})
+- NEVER pass "undefined", "null", "", ".", or any relative path as a path argument
+- NEVER guess or omit the workspace prefix
+
+WORKFLOW RULES:
+0. Stay in context. Remember what you change, read or write. Do what the user tells you to accurately.
 1. ALWAYS use tools to create/edit files. NEVER show file contents in chat as markdown or code blocks.
 2. When asked to create multiple files, call write_file for EACH file one by one until ALL are created.
-3. After each tool result, immediately call the next tool needed. Do NOT stop to explain.
-4. Only reply with plain text AFTER all tools have been called and the task is fully complete.
-5. Workspace root: ${workspace}
-6. ALL file paths must start with: ${workspace}/
-7. NEVER use placeholder paths like /path/to/file.`,
+3. After each tool result, immediately call the next tool needed. You can explain but should go on to call more tools without stopping the work.
+4. Do not create fake commands and do not forget slashes between files in directories.
+`,
   };
   if (history.length > 0 && history[0].role === 'system') {
     history = [systemMsg, ...history.slice(1)];
