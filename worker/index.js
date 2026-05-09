@@ -329,7 +329,7 @@ async function main() {
   const engine = resolveEngine(config);
 
   const cores         = os.cpus().length;
-  const maxThreads    = config.maxThreads    || Math.max(2, Math.floor(cores / 2));
+  const maxThreads    = config.maxThreads    || Math.max(2, Math.round(cores * 0.85));
   const maxConcurrent = config.maxConcurrent || 1;
   const numCtx        = config.numCtx        || 32768;
   const capacity      = { cores, maxThreads, maxConcurrent };
