@@ -50,6 +50,11 @@ let history       = [];
 let sessionTokens = { prompt: 0, response: 0 };
 let currentMode   = localStorage.getItem(MODE_KEY) || 'chat';  // 'chat' | 'code'
 let workspace     = localStorage.getItem(WORKSPACE_KEY) || '';
+// Sanitize stale 'undefined' / 'null' strings that may have been written to localStorage
+if (workspace === 'undefined' || workspace === 'null') {
+  workspace = '';
+  localStorage.removeItem(WORKSPACE_KEY);
+}
 let abortRef      = { aborted: false };
 let remembered    = new Set(); // "toolName:pathPrefix" approved this conversation
 
@@ -91,7 +96,7 @@ modeCodeBtn.addEventListener('click', () => applyMode('code'));
 
 workspaceBtn.addEventListener('click', async () => {
   const result = await ipcRenderer.invoke('agent:choose-workspace');
-  if (result.ok) {
+  if (result.ok && result.path && result.path !== 'undefined' && result.path !== 'null') {
     workspace = result.path;
     localStorage.setItem(WORKSPACE_KEY, workspace);
     updateWorkspaceLabel();
