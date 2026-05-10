@@ -66,12 +66,12 @@ const TOOL_DEFINITIONS = [
   // ── Tier B: mutating ───────────────────────────────────────────────
   {
     name: 'write_file',
-    description: 'Write content to a file. Creates the file if it does not exist. Overwrites if it does.',
+    description: 'Write full content to a file. ONLY use this to CREATE new files that do not exist yet. NEVER use this to modify an existing file — use edit_file instead. Overwriting an existing file with write_file wastes tokens and risks losing content. For any existing file, always use edit_file.',
     parameters: {
       type: 'object',
       properties: {
         path:    { type: 'string', description: 'Path to the file (relative to workspace root or absolute).' },
-        content: { type: 'string', description: 'Full content to write.' },
+        content: { type: 'string', description: 'Full content to write. Only used when creating a new file.' },
       },
       required: ['path', 'content'],
     },
@@ -79,12 +79,12 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'edit_file',
-    description: 'Replace an exact string in a file with a new string. old_string must appear exactly once.',
+    description: 'Replace an exact string in a file with a new string. ALWAYS prefer this over write_file for modifying existing files — it is faster, safer, and uses far fewer tokens. old_string must appear exactly once in the file. Call edit_file multiple times to make multiple changes.',
     parameters: {
       type: 'object',
       properties: {
         path:       { type: 'string', description: 'Path to the file.' },
-        old_string: { type: 'string', description: 'Exact text to find and replace.' },
+        old_string: { type: 'string', description: 'Exact text to find and replace. Must be unique in the file.' },
         new_string: { type: 'string', description: 'Replacement text.' },
       },
       required: ['path', 'old_string', 'new_string'],
