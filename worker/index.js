@@ -193,6 +193,7 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       stream_options: { include_usage: true },  // get token counts in stream
       max_tokens: 8192,
       temperature: 0.7,
+      cache_prompt: true,
     };
     if (job.tools && job.tools.length > 0) {
       body.tools = job.tools;
