@@ -191,7 +191,7 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       messages,
       stream: true,
       stream_options: { include_usage: true },  // get token counts in stream
-      max_tokens: 8192,
+      max_tokens: 16384,
       temperature: 0.7,
       cache_prompt: true,
     };
