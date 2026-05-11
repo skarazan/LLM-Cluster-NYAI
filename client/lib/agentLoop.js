@@ -391,23 +391,16 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       }
     }
 
-    // Tool call overflow error from worker — inject as user feedback and retry (max 2)
+    // Tool call overflow error from worker — retry with limit
     if (!data.tool_calls && data.response && data.response.startsWith('ERROR:')) {
       overflowRetries++;
-      // If model already did real work, don't waste retries — tell it to wrap up
-      if (toolCallCount >= 3) {
-        appendBubble('error', `Tool call too large after ${toolCallCount} successful calls — wrapping up.`);
-        history.push({ role: 'assistant', content: data.response });
-        history.push({ role: 'user', content: 'Your last tool call was too large, but your previous work was successful. If the task is complete, say "Done." with a summary. If you still need to write a file, split it into 50-line chunks using write_file then append_file.' });
-        continue;
-      }
       if (overflowRetries > 2) {
-        appendBubble('error', 'Tool call overflow repeated 3 times — stopping. Model cannot fit file content within llama.cpp limits.');
+        appendBubble('error', `Tool call overflow repeated ${overflowRetries} times — stopping.`);
         break;
       }
       appendBubble('error', `Tool call too large — retry ${overflowRetries}/2…`);
       history.push({ role: 'assistant', content: data.response });
-      history.push({ role: 'user', content: 'CRITICAL: Your tool call was too large and got truncated. To write large files you MUST:\n1. Call write_file with ONLY the first 50 lines of the file\n2. Then call append_file with the next 50 lines\n3. Repeat append_file until done\nEach call must have under 1500 characters of content. Do this NOW.' });
+      history.push({ role: 'user', content: 'CRITICAL: Tool call JSON crashed. You MUST:\n1. Use SINGLE QUOTES for all HTML attributes (not double quotes)\n2. write_file with ONLY first 50 lines, then append_file for each next 50\n3. Each call under 1500 chars.\nIf task is already complete, say "Done." instead.' });
       continue;
     }
 
