@@ -153,6 +153,14 @@ WORKFLOW RULES:
       }
     }
 
+    // Tool call overflow error from worker — inject as user feedback and retry
+    if (!data.tool_calls && data.response && data.response.startsWith('ERROR: Your previous tool call failed')) {
+      appendBubble('error', 'Tool call too large — retrying with guidance to use smaller writes…');
+      history.push({ role: 'assistant', content: data.response });
+      history.push({ role: 'user', content: 'The tool call failed because the content was too large. You MUST use edit_file for existing files or split new files into chunks under 3000 characters. Do NOT attempt write_file with large content again. Continue the task.' });
+      continue;
+    }
+
     // No tool calls — final text response
     if (!data.tool_calls || data.tool_calls.length === 0) {
       const tok = data.tokens;
