@@ -102,13 +102,13 @@ WORKFLOW RULES:
     }, 0);
   }
 
-  // Trim history to fit context: truncate old tool results, then drop old turns if still too big.
-  // MAX_CTX_TOKENS reserves room for tool schemas (~2K tok) + system prompt + model output.
-  const MAX_CTX_TOKENS = 10000;
+  // Trim history to fit context window.
+  // Budget: leave room for tool schemas (~3K tok) + system prompt (~500 tok) + model output (~4K tok).
+  const MAX_CTX_TOKENS = 8000;
   function trimHistory(msgs) {
-    // Step 1: truncate old tool result content
-    const MAX_TOOL_RESULT_CHARS = 500;
-    const KEEP_RECENT = 4;
+    // Step 1: truncate ALL old tool results aggressively, keep only last 2 full
+    const MAX_TOOL_RESULT_CHARS = 300;
+    const KEEP_RECENT = 2;
     let toolResultsSeen = 0;
     const total = msgs.filter(m => m.role === 'tool').length;
     let trimmed = msgs.map(m => {
@@ -122,9 +122,30 @@ WORKFLOW RULES:
       return m;
     });
 
-    // Step 2: if still over budget, drop oldest middle turns.
-    // Always keep: index 0 (system), index 1 (first user message = original task), last 3.
-    while (estimateTokens(trimmed) > MAX_CTX_TOKENS && trimmed.length > 5) {
+    // Step 2: truncate old assistant tool_calls args (write_file content is huge)
+    for (let i = 0; i < trimmed.length - 6; i++) {
+      const m = trimmed[i];
+      if (m.role === 'assistant' && m.tool_calls) {
+        trimmed[i] = {
+          ...m,
+          tool_calls: m.tool_calls.map(tc => {
+            if (!tc.function?.arguments) return tc;
+            let args = tc.function.arguments;
+            if (typeof args === 'string' && args.length > 200) {
+              args = args.slice(0, 200) + '…';
+            } else if (typeof args === 'object') {
+              const s = JSON.stringify(args);
+              if (s.length > 200) args = s.slice(0, 200) + '…';
+            }
+            return { ...tc, function: { ...tc.function, arguments: args } };
+          }),
+        };
+      }
+    }
+
+    // Step 3: drop oldest middle turns if still over budget.
+    // Keep: index 0 (system), index 1 (original task), last 4.
+    while (estimateTokens(trimmed) > MAX_CTX_TOKENS && trimmed.length > 6) {
       trimmed.splice(2, 1);
     }
 
