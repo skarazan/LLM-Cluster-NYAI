@@ -132,12 +132,12 @@ const TOOL_DEFINITIONS = [
   // ── Tier C: shell ──────────────────────────────────────────────────
   {
     name: 'run_shell',
-    description: 'Run a shell command inside the workspace directory. Use for running tests, builds, linters, etc.',
+    description: 'Run a SHORT shell command. ONLY for: npm/pip install, running tests, builds, linters, opening files. NEVER use for writing file content (no cat >, echo >, heredoc). To write files use <write_file> XML tags in your text response.',
     parameters: {
       type: 'object',
       properties: {
-        cmd:        { type: 'string',  description: 'Command name (e.g. "node", "python3", "npm").' },
-        args:       { type: 'array',   items: { type: 'string' }, description: 'Command arguments as an array.' },
+        cmd:        { type: 'string',  description: 'Command name only (e.g. "node", "npm", "open"). Max 100 chars.', maxLength: 100 },
+        args:       { type: 'array',   items: { type: 'string', maxLength: 200 }, description: 'Command arguments as an array. Each arg max 200 chars.' },
         cwd:        { type: 'string',  description: 'Working directory relative to workspace root. Optional.' },
         timeout_ms: { type: 'number',  description: 'Timeout in milliseconds. Default 30000.' },
       },
