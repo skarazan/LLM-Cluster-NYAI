@@ -156,10 +156,13 @@ async function runAgentTurn(opts) {
 
   // ── Execution Phase ─────────────────────────────────────────────────
   let history = [...messages];
-  const toolNames = tools.map(t => t.function?.name || t.name).join(', ');
+  const toolCallNames = tools.filter(t => {
+    const n = t.function?.name || t.name;
+    return n !== 'write_file' && n !== 'append_file';
+  }).map(t => t.function?.name || t.name).join(', ');
   const systemMsg = {
     role: 'system',
-    content: `You are a coding assistant with filesystem tools. Tools: ${toolNames}.
+    content: `You are a coding assistant with filesystem tools. Tool calls: ${toolCallNames}. File writing: use <write_file> and <append_file> XML tags (see rules below).
 
 WORKSPACE = "${workspace}"
 
@@ -167,24 +170,23 @@ CRITICAL PATH RULES — NEVER violate:
 - Every tool call that takes a path argument MUST use an absolute path starting with "${workspace}/"
 - list_dir root = "${workspace}" — call it as: list_dir({"path": "${workspace}"})
 - read_file example: read_file({"path": "${workspace}/src/index.js"})
-- write_file example: write_file({"path": "${workspace}/src/newfile.js", "content": "..."})
+- write_file example: <write_file path="${workspace}/src/newfile.js">content here</write_file>
 - NEVER pass "undefined", "null", "", ".", or any relative path as a path argument
 - NEVER guess or omit the workspace prefix
 
-CRITICAL FILE SIZE RULE — NEVER violate:
-- NEVER write more than 50 lines or 1500 characters in a single write_file or append_file call.
-- For ANY file longer than 50 lines: write_file first 50 lines, then append_file next 50, repeat.
-- Tool calls exceeding this limit WILL CRASH. No exceptions.
-- Example: a 150-line file = write_file(lines 1-50) + append_file(lines 51-100) + append_file(lines 101-150).
-
-CRITICAL HTML RULE:
-- In ALL HTML files, use SINGLE QUOTES for attributes: <meta charset='UTF-8'> NOT <meta charset="UTF-8">
-- Double quotes inside tool call content WILL CRASH the JSON parser. Always use single quotes in HTML.
+FILE WRITING — use XML tags, NOT tool calls:
+- To create/write a file, output: <write_file path="${workspace}/path/to/file">content here</write_file>
+- To append to a file, output: <append_file path="${workspace}/path/to/file">content here</append_file>
+- For files over 80 lines: use <write_file> for first 80 lines, then <append_file> for rest.
+- The content goes BETWEEN the tags as raw text. No JSON escaping needed.
+- You can use double quotes freely inside the tags.
+- Do NOT use write_file or append_file as tool calls — ONLY as XML tags in your response text.
+- Use edit_file tool call for modifying existing files (small targeted changes only).
 
 WORKFLOW RULES:
 0. You are an AUTONOMOUS agent. Complete the ENTIRE task without stopping to ask the user. NEVER ask "what would you like me to do next" or "should I continue". Just keep working until everything is done.
-1. ALWAYS use tools to create/edit files. NEVER show file contents in chat as markdown or code blocks.
-2. When asked to create multiple files, call write_file for EACH file one by one until ALL are created. Do NOT stop partway through.
+1. ALWAYS use <write_file> tags to create files and edit_file tool for modifications. NEVER show file contents in chat as markdown or code blocks.
+2. When asked to create multiple files, use <write_file> for EACH file one by one until ALL are created. Do NOT stop partway through.
 3. After each tool result, immediately call the next tool needed. Do NOT summarize progress or ask for confirmation — just continue.
 4. Do not create fake commands and do not forget slashes between files in directories.
 5. When the task is fully complete, say "Done." with a brief summary of what was created/modified. This is the ONLY time you should stop.
@@ -355,9 +357,13 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
     // Remove any previous stream bubble before starting a new request
     if (activeStreamEl) { activeStreamEl.remove(); activeStreamEl = null; }
 
-    // Send to backend
+    // Send to backend — filter out write_file/append_file from tools (use XML tags instead)
+    const filteredTools = tools.filter(t => {
+      const name = t.function?.name || t.name;
+      return name !== 'write_file' && name !== 'append_file';
+    });
     setLoading(true);
-    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: await trimHistory(history), model, tools });
+    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: await trimHistory(history), model, tools: filteredTools });
     setLoading(false);
 
     // Remove stream bubble now that we have the final response
@@ -382,11 +388,49 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       }
       data.response = data.response.replace(thinkRe, '').trim();
     }
+    // Extract <write_file> and <append_file> XML tags from response text
+    if (data.response) {
+      const writeRe = /<(write_file|append_file)\s+path="([^"]+)">([\s\S]*?)<\/\1>/g;
+      const writeMatches = [...data.response.matchAll(writeRe)];
+      for (const wm of writeMatches) {
+        const [fullMatch, tagName, filePath, content] = wm;
+        const lines = content.split('\n');
+        // Auto-chunk if over 80 lines
+        const chunks = [];
+        for (let i = 0; i < lines.length; i += 80) {
+          chunks.push(lines.slice(i, i + 80).join('\n'));
+        }
+        const firstTool = tagName === 'append_file' ? 'append_file' : 'write_file';
+        let result = await ipcRenderer.invoke('agent:run-tool', {
+          tool: firstTool, args: { path: filePath, content: chunks[0] }, workspace,
+        });
+        for (let c = 1; c < chunks.length && result.ok; c++) {
+          result = await ipcRenderer.invoke('agent:run-tool', {
+            tool: 'append_file', args: { path: filePath, content: '\n' + chunks[c] }, workspace,
+          });
+        }
+        if (result.ok) {
+          const parts = chunks.length > 1 ? ` (${lines.length} lines, auto-chunked ${chunks.length} parts)` : '';
+          appendBubble('assistant', `✓ ${filePath}${parts}`);
+          toolCallCount++;
+        } else {
+          appendBubble('error', `File write failed: ${result.error}`);
+        }
+        history.push({ role: 'assistant', content: `Wrote ${filePath} (${lines.length} lines)` });
+      }
+      // Strip the XML tags from response text
+      if (writeMatches.length > 0) {
+        data.response = data.response.replace(writeRe, '').trim();
+        overflowRetries = 0;
+        // If there was only file writes and no other content, loop for next action
+        if (!data.response && !data.tool_calls) continue;
+      }
+    }
+
     if ((!data.tool_calls || data.tool_calls.length === 0) && data.response) {
       const extracted = extractToolCallsFromText(data.response, history);
       if (extracted.length > 0) {
         data.tool_calls = extracted;
-        // Strip the JSON from response so it's not shown as text
         data.response = '';
       }
     }
