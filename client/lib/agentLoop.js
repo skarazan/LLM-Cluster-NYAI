@@ -376,7 +376,7 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       }
       appendBubble('error', `Tool call too large — retry ${overflowRetries}/2…`);
       history.push({ role: 'assistant', content: data.response });
-      history.push({ role: 'user', content: 'The tool call failed because the content was too large. You MUST use edit_file for existing files or split new files into chunks under 3000 characters. Do NOT attempt write_file with large content again. Continue the task.' });
+      history.push({ role: 'user', content: 'CRITICAL: Your tool call was too large and got truncated. To write large files you MUST:\n1. Call write_file with ONLY the first 60 lines of the file\n2. Then call append_file with the next 60 lines\n3. Repeat append_file until done\nEach call must have under 2000 characters of content. Do this NOW — do not try to write the entire file in one call.' });
       continue;
     }
 
@@ -480,6 +480,32 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       // Execute or reject
       let toolResult;
       if (approved) {
+        // Auto-chunk: if write_file content > 80 lines, split into write + appends
+        if ((toolName === 'write_file' || toolName === 'append_file') && args.content) {
+          const lines = args.content.split('\n');
+          if (lines.length > 80) {
+            const chunks = [];
+            for (let i = 0; i < lines.length; i += 80) {
+              chunks.push(lines.slice(i, i + 80).join('\n'));
+            }
+            // First chunk: write_file
+            toolResult = await ipcRenderer.invoke('agent:run-tool', {
+              tool: 'write_file', args: { path: args.path, content: chunks[0] }, workspace,
+            });
+            // Remaining chunks: append_file
+            for (let c = 1; c < chunks.length && toolResult.ok; c++) {
+              toolResult = await ipcRenderer.invoke('agent:run-tool', {
+                tool: 'append_file', args: { path: args.path, content: '\n' + chunks[c] }, workspace,
+              });
+            }
+            if (toolResult.ok) {
+              appendBubble('assistant', `✓ ${args.path} (${lines.length} lines, auto-chunked ${chunks.length} parts)`);
+              history.push({ role: 'tool', tool_call_id: call.id, content: `<tool_result tool="${toolName}">\n${JSON.stringify({ ok: true, result: `Wrote ${lines.length} lines to ${args.path}` })}\n</tool_result>` });
+              continue;
+            }
+          }
+        }
+
         toolResult = await ipcRenderer.invoke('agent:run-tool', { tool: toolName, args, workspace });
 
         // Auto-retry: edit_file "old_string not found" → read actual content and tell model
