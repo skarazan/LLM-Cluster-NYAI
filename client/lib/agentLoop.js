@@ -53,11 +53,12 @@ CRITICAL PATH RULES — NEVER violate:
 - NEVER guess or omit the workspace prefix
 
 WORKFLOW RULES:
-0. Stay in context. Remember what you change, read or write. Do what the user tells you to accurately.
+0. You are an AUTONOMOUS agent. Complete the ENTIRE task without stopping to ask the user. NEVER ask "what would you like me to do next" or "should I continue". Just keep working until everything is done.
 1. ALWAYS use tools to create/edit files. NEVER show file contents in chat as markdown or code blocks.
-2. When asked to create multiple files, call write_file for EACH file one by one until ALL are created.
-3. After each tool result, immediately call the next tool needed. You can explain but should go on to call more tools without stopping the work.
+2. When asked to create multiple files, call write_file for EACH file one by one until ALL are created. Do NOT stop partway through.
+3. After each tool result, immediately call the next tool needed. Do NOT summarize progress or ask for confirmation — just continue.
 4. Do not create fake commands and do not forget slashes between files in directories.
+5. When the task is fully complete, say "Done." with a brief summary of what was created/modified. This is the ONLY time you should stop.
 `,
   };
   if (history.length > 0 && history[0].role === 'system') {
@@ -121,10 +122,10 @@ WORKFLOW RULES:
       return m;
     });
 
-    // Step 2: if still over budget, drop oldest non-system turns
-    while (estimateTokens(trimmed) > MAX_CTX_TOKENS && trimmed.length > 4) {
-      // Always keep index 0 (system) and last 3 messages
-      trimmed.splice(1, 1);
+    // Step 2: if still over budget, drop oldest middle turns.
+    // Always keep: index 0 (system), index 1 (first user message = original task), last 3.
+    while (estimateTokens(trimmed) > MAX_CTX_TOKENS && trimmed.length > 5) {
+      trimmed.splice(2, 1);
     }
 
     return trimmed;
