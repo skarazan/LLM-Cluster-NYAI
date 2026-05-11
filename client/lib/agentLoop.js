@@ -548,32 +548,6 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       // Execute or reject
       let toolResult;
       if (approved) {
-        // Auto-chunk: if write_file content > 80 lines, split into write + appends
-        if ((toolName === 'write_file' || toolName === 'append_file') && args.content) {
-          const lines = args.content.split('\n');
-          if (lines.length > 80) {
-            const chunks = [];
-            for (let i = 0; i < lines.length; i += 80) {
-              chunks.push(lines.slice(i, i + 80).join('\n'));
-            }
-            // First chunk: write_file
-            toolResult = await ipcRenderer.invoke('agent:run-tool', {
-              tool: 'write_file', args: { path: args.path, content: chunks[0] }, workspace,
-            });
-            // Remaining chunks: append_file
-            for (let c = 1; c < chunks.length && toolResult.ok; c++) {
-              toolResult = await ipcRenderer.invoke('agent:run-tool', {
-                tool: 'append_file', args: { path: args.path, content: '\n' + chunks[c] }, workspace,
-              });
-            }
-            if (toolResult.ok) {
-              appendBubble('assistant', `✓ ${args.path} (${lines.length} lines, auto-chunked ${chunks.length} parts)`);
-              history.push({ role: 'tool', tool_call_id: call.id, content: `<tool_result tool="${toolName}">\n${JSON.stringify({ ok: true, result: `Wrote ${lines.length} lines to ${args.path}` })}\n</tool_result>` });
-              continue;
-            }
-          }
-        }
-
         toolResult = await ipcRenderer.invoke('agent:run-tool', { tool: toolName, args, workspace });
 
         // Auto-retry: edit_file "old_string not found" → read actual content and tell model
