@@ -289,6 +289,13 @@ ipcMain.handle('agent:verify-files', async (event, { paths, workspace }) => {
           continue;
         }
       }
+      if (/\.html?$/i.test(p)) {
+        const frontendCheck = await verifyFrontendFile(check.resolved);
+        if (!frontendCheck.ok) {
+          results.push({ path: p, ok: false, bytes: stat.size, error: frontendCheck.error });
+          continue;
+        }
+      }
       results.push({ path: p, ok: true, bytes: stat.size, error: null });
     } catch (err) {
       results.push({ path: p, ok: false, error: err.message });
@@ -296,6 +303,88 @@ ipcMain.handle('agent:verify-files', async (event, { paths, workspace }) => {
   }
   return { ok: true, results };
 });
+
+async function verifyFrontendFile(htmlPath) {
+  const dir = path.dirname(htmlPath);
+  const html = await fs.readFile(htmlPath, 'utf8');
+  const issues = [];
+
+  const cssText = [];
+  for (const href of extractAttrValues(html, /<link\b[^>]*rel=['"]?stylesheet['"]?[^>]*>/gi, 'href')) {
+    const cssPath = path.resolve(dir, href);
+    try {
+      cssText.push(await fs.readFile(cssPath, 'utf8'));
+    } catch {
+      issues.push(`missing stylesheet: ${href}`);
+    }
+  }
+
+  const jsText = [];
+  for (const src of extractAttrValues(html, /<script\b[^>]*src=['"][^'"]+['"][^>]*>/gi, 'src')) {
+    const jsPath = path.resolve(dir, src);
+    try {
+      jsText.push(await fs.readFile(jsPath, 'utf8'));
+    } catch {
+      issues.push(`missing script: ${src}`);
+    }
+  }
+
+  const htmlClasses = extractHtmlClasses(html);
+  const cssClasses = extractCssClasses(cssText.join('\n'));
+  const importantMissingClasses = htmlClasses
+    .filter(cls => /header|search|product|cart|modal|checkout|hero|nav|grid|card|button|filter/i.test(cls))
+    .filter(cls => !cssClasses.has(cls));
+  if (htmlClasses.length >= 8 && importantMissingClasses.length >= 5) {
+    issues.push(`many important HTML classes have no CSS rule: ${importantMissingClasses.slice(0, 12).join(', ')}`);
+  }
+
+  const htmlIds = extractHtmlIds(html);
+  const jsIds = extractJsIds(jsText.join('\n'));
+  const missingIds = [...jsIds].filter(id => !htmlIds.has(id));
+  if (missingIds.length > 0) {
+    issues.push(`JavaScript references missing element ids: ${missingIds.slice(0, 12).join(', ')}`);
+  }
+
+  return issues.length
+    ? { ok: false, error: issues.join('; ') }
+    : { ok: true };
+}
+
+function extractAttrValues(html, tagRe, attr) {
+  const values = [];
+  for (const tagMatch of html.matchAll(tagRe)) {
+    const attrMatch = tagMatch[0].match(new RegExp(`${attr}\\s*=\\s*['"]([^'"]+)['"]`, 'i'));
+    if (attrMatch && !/^https?:\/\//i.test(attrMatch[1])) values.push(attrMatch[1]);
+  }
+  return values;
+}
+
+function extractHtmlClasses(html) {
+  const classes = new Set();
+  for (const match of html.matchAll(/\bclass\s*=\s*['"]([^'"]+)['"]/gi)) {
+    match[1].split(/\s+/).filter(Boolean).forEach(cls => classes.add(cls));
+  }
+  return [...classes];
+}
+
+function extractHtmlIds(html) {
+  const ids = new Set();
+  for (const match of html.matchAll(/\bid\s*=\s*['"]([^'"]+)['"]/gi)) ids.add(match[1]);
+  return ids;
+}
+
+function extractCssClasses(css) {
+  const classes = new Set();
+  for (const match of css.matchAll(/\.([_a-zA-Z][_a-zA-Z0-9-]*)/g)) classes.add(match[1]);
+  return classes;
+}
+
+function extractJsIds(js) {
+  const ids = new Set();
+  for (const match of js.matchAll(/getElementById\(\s*['"]([^'"]+)['"]\s*\)/g)) ids.add(match[1]);
+  for (const match of js.matchAll(/querySelector(?:All)?\(\s*['"]#([^'".\s>]+)['"]/g)) ids.add(match[1]);
+  return ids;
+}
 
 // ── Helper: simple recursive grep ───────────────────────────────────────────
 async function grepDir(root, pattern, globFilter, useRegex) {

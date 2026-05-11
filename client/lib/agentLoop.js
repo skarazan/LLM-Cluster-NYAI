@@ -132,12 +132,15 @@ async function runAgentTurn(opts) {
   const {
     backendUrl, messages, model, tools,
     workspace, approvalMode, planMode,
-    chat, appendBubble, appendActivity, setLoading,
+    chat, appendBubble, appendActivity, updateLedgerView, setLoading,
     abortRef, remembered,
   } = opts;
   const addActivity = (activity) => {
     if (typeof appendActivity === 'function') return appendActivity(activity);
     return appendBubble(activity.status === 'error' ? 'error' : 'assistant', activity.title || activity.subtitle || 'Activity');
+  };
+  const refreshLedgerView = () => {
+    if (typeof updateLedgerView === 'function') updateLedgerView(formatLedgerForDisplay(taskLedger));
   };
 
   // ── Plan Phase (only when toggled on) ───────────────────────────────
@@ -197,6 +200,7 @@ FILE WRITING — use XML tags, NOT tool calls:
 - Do NOT use write_file or append_file as tool calls — ONLY as XML tags in your response text.
 - NEVER use run_shell to write files (no cat >, echo >, heredoc, tee, etc). ONLY <write_file> tags.
 - Use edit_file tool call for modifying existing files (small targeted changes only).
+- NEVER output placeholder paths like "/file", "path/to/file", or "/absolute/path/to/file". Use the actual absolute target path.
 
 WORKFLOW RULES:
 0. You are an AUTONOMOUS agent. Complete the ENTIRE task without stopping to ask the user. NEVER ask "what would you like me to do next" or "should I continue". Just keep working until everything is done.
@@ -215,6 +219,7 @@ ${formatLedgerForPrompt(taskLedger)}
   } else {
     history = [systemMsg, ...history];
   }
+  refreshLedgerView();
 
   let toolCallCount = 0;
   let overflowRetries = 0;
@@ -421,10 +426,29 @@ ${formatLedgerForPrompt(taskLedger)}
     // fragile with large escaped source files.
     if (data.response) {
       const writeBlocks = extractTextWriteBlocks(data.response, history);
-      for (const block of writeBlocks) {
+      for (let block of writeBlocks) {
+        const normalized = normalizeTextWriteBlockPath(block, taskLedger, workspace);
+        if (!normalized.ok) {
+          markLedgerFailed(taskLedger, block.path, normalized.error);
+          refreshLedgerView();
+          addActivity({
+            kind: 'write',
+            status: 'error',
+            title: `Rejected placeholder path ${block.path}`,
+            subtitle: block.path,
+            detail: { path: block.path, status: 'rejected', error: normalized.error, preview: previewText(block.content) },
+          });
+          history.push({
+            role: 'user',
+            content: `${normalized.error}\nUse an exact absolute path under "${workspace}". Pending files are: ${getPendingFiles(taskLedger).join(', ') || '(none known)'}.`,
+          });
+          continue;
+        }
+        block = normalized.block;
         const result = await executeTextWriteBlock(block, workspace);
         if (result.ok) {
           markLedgerWritten(taskLedger, block.path);
+          refreshLedgerView();
           const parts = result.chunks > 1 ? ` (${result.lines} lines, auto-chunked ${result.chunks} parts)` : '';
           addActivity({
             kind: 'write',
@@ -444,6 +468,7 @@ ${formatLedgerForPrompt(taskLedger)}
           toolCallCount++;
         } else {
           markLedgerFailed(taskLedger, block.path, result.error);
+          refreshLedgerView();
           addActivity({
             kind: 'write',
             status: 'error',
@@ -483,7 +508,7 @@ ${formatLedgerForPrompt(taskLedger)}
         history.push({ role: 'assistant', content: stripLargeIncompleteWrite(data.response) });
         history.push({
           role: 'user',
-          content: `Your previous <${incompleteWrite.tool}> block${incompleteWrite.path ? ` for "${incompleteWrite.path}"` : ''} was cut off before the closing tag, so it was NOT written. Re-send that file now using only complete XML blocks. Prefer smaller chunks: <write_file path="...">first chunk</write_file> then <append_file path="...">next chunk</append_file>. Do not use JSON tools and do not say Done.`,
+          content: `Your previous <${incompleteWrite.tool}> block${incompleteWrite.path ? ` for "${incompleteWrite.path}"` : ''} was cut off before the closing tag, so it was NOT written. Re-send that file now using only complete XML blocks. Prefer smaller chunks with actual absolute paths under "${workspace}". Do not use placeholder paths, JSON tools, or say Done.`,
         });
         continue;
       }
@@ -507,7 +532,7 @@ ${formatLedgerForPrompt(taskLedger)}
       appendBubble('error', `Tool call too large — retry ${overflowRetries}/2…`);
       forceTextWriteOnly = true;
       history.push({ role: 'assistant', content: data.response });
-      history.push({ role: 'user', content: 'CRITICAL: Native JSON tool calling crashed while trying to write a file. For the next response, DO NOT call any tools. Output only file-write text blocks like <write_file path="' + workspace + '/path/to/file.js">...</write_file> or <append_file path="' + workspace + '/path/to/file.js">...</append_file>. Put the full code between the tags as plain text. If the task is already complete, say "Done." instead.' });
+      history.push({ role: 'user', content: 'CRITICAL: Native JSON tool calling crashed while trying to write a file. For the next response, DO NOT call any tools. Output only file-write text blocks with the real target filename under "' + workspace + '". Example: <write_file path="' + workspace + '/index.html">...</write_file>. Put the full code between the tags as plain text. Never use /file or /absolute/path/to/file. If the task is already complete, say "Done." instead.' });
       continue;
     }
 
@@ -549,6 +574,7 @@ ${formatLedgerForPrompt(taskLedger)}
         const verification = await verifyLedgerFiles(taskLedger, workspace);
         if (!verification.ok) {
           for (const item of verification.failed) markLedgerFailed(taskLedger, item.path, item.error);
+          refreshLedgerView();
           history.push({ role: 'assistant', content: resp });
           history.push({
             role: 'user',
@@ -684,6 +710,7 @@ ${formatLedgerForPrompt(taskLedger)}
         // Surface errors visibly so the user can see what went wrong
         if (!toolResult.ok) {
           if (args.path) markLedgerFailed(taskLedger, args.path, toolResult.error);
+          refreshLedgerView();
           addActivity({
             kind: activityKindForTool(toolName),
             status: 'error',
@@ -697,6 +724,7 @@ ${formatLedgerForPrompt(taskLedger)}
           }
         } else {
           if (['edit_file', 'create_dir'].includes(toolName) && args.path) markLedgerWritten(taskLedger, args.path);
+          refreshLedgerView();
           // Show a brief success confirmation for write/shell tools
           const visibleTools = ['write_file', 'append_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell', 'read_file', 'list_dir', 'grep', 'glob'];
           if (visibleTools.includes(toolName)) {
@@ -948,6 +976,35 @@ function markLedgerFailed(ledger, path, error) {
   ledger.failedFiles.set(path, error || 'unknown error');
 }
 
+function isPlaceholderPath(path, workspace) {
+  const p = String(path || '').trim();
+  if (!p) return true;
+  if (/^\/?(absolute\/path\/to\/file|path\/to\/file|file)$/i.test(p)) return true;
+  if (/\/absolute\/path\/to\/file/i.test(p)) return true;
+  if (p === '/file' || p === `${workspace}/path/to/file`) return true;
+  return false;
+}
+
+function normalizeTextWriteBlockPath(block, ledger, workspace) {
+  let path = String(block.path || '').trim();
+  if (isPlaceholderPath(path, workspace)) {
+    const pending = getPendingFiles(ledger);
+    const replacement = pending.find(p => looksLikeSourcePath(p));
+    if (!replacement) {
+      return {
+        ok: false,
+        error: `The model used placeholder path "${path}". No pending planned file was available to safely map it to.`,
+      };
+    }
+    return { ok: true, block: { ...block, path: replacement } };
+  }
+
+  if (workspace && !path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path)) {
+    path = `${workspace}/${path.replace(/^\.?\//, '')}`;
+  }
+  return { ok: true, block: { ...block, path } };
+}
+
 function getPendingFiles(ledger) {
   return [...ledger.plannedFiles].filter(p => !ledger.writtenFiles.has(p));
 }
@@ -958,6 +1015,28 @@ function formatLedgerForPrompt(ledger) {
   const failed = [...ledger.failedFiles.entries()];
   if (planned.length === 0 && failed.length === 0) return '';
   return `\nTASK LEDGER:\n- Planned files: ${planned.length ? planned.join(', ') : '(none detected)'}\n- Written files: ${[...ledger.writtenFiles].join(', ') || '(none yet)'}\n- Pending files: ${pending.join(', ') || '(none)'}\n- Failed files: ${failed.map(([p, e]) => `${p} (${e})`).join(', ') || '(none)'}\n`;
+}
+
+function formatLedgerForDisplay(ledger) {
+  const planned = [...ledger.plannedFiles];
+  const written = [...ledger.writtenFiles];
+  const pending = getPendingFiles(ledger);
+  const failed = [...ledger.failedFiles.entries()];
+  return [
+    'Task Ledger',
+    '',
+    `Planned (${planned.length})`,
+    ...(planned.length ? planned.map(p => `  - ${p}`) : ['  (none detected)']),
+    '',
+    `Written (${written.length})`,
+    ...(written.length ? written.map(p => `  - ${p}`) : ['  (none yet)']),
+    '',
+    `Pending (${pending.length})`,
+    ...(pending.length ? pending.map(p => `  - ${p}`) : ['  (none)']),
+    '',
+    `Failed (${failed.length})`,
+    ...(failed.length ? failed.map(([p, e]) => `  - ${p}: ${e}`) : ['  (none)']),
+  ].join('\n');
 }
 
 function injectLedgerStatus(messages, ledger) {

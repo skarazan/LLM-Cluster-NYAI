@@ -311,6 +311,20 @@ footer button:disabled { opacity: 0.4; cursor: not-allowed; }
   font-size: 13px;
 }
 .code-controls.hidden { display: none; }
+.code-controls button.secondary,
+.code-controls select {
+  padding: 5px 10px;
+  background: #1a1b26;
+  border: 1px solid #2c2e3e;
+  border-radius: 6px;
+  color: #c0caf5;
+  font-size: 13px;
+  cursor: pointer;
+}
+.code-controls button.secondary:hover,
+.code-controls select:hover {
+  background: #24283b;
+}
 
 .stop-btn {
   padding: 5px 12px;

@@ -280,7 +280,7 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
         : '';
 
       return {
-        content: `ERROR: Native tool-call JSON was truncated.${hint}${htmlFix}\nYou MUST stop using JSON tool calls for file contents. Continue by outputting plain text blocks only:\n<write_file path="/absolute/path/to/file">full file content here</write_file>\nor\n<append_file path="/absolute/path/to/file">more content here</append_file>\nDo not call write_file or append_file as tools.`,
+        content: `ERROR: Native tool-call JSON was truncated.${hint}${htmlFix}\nYou MUST stop using JSON tool calls for file contents. Continue by outputting plain text blocks only, using the real absolute target path from the workspace/task:\n<write_file path="/real/workspace/filename.ext">full file content here</write_file>\nor\n<append_file path="/real/workspace/filename.ext">more content here</append_file>\nNever use placeholder paths like /file or /absolute/path/to/file. Do not call write_file or append_file as tools.`,
         tool_calls: null,
         tokens: { prompt: 0, response: 0, total: 0, tokensPerSec: null },
       };

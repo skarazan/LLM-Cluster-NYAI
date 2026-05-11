@@ -41,6 +41,7 @@ const workspaceBtn   = document.getElementById('workspace-btn');
 const workspaceLabel = document.getElementById('workspace-label');
 const approvalSel    = document.getElementById('approval-mode');
 const planModeCheck  = document.getElementById('plan-mode');
+const ledgerBtn      = document.getElementById('ledger-btn');
 const stopBtn        = document.getElementById('stop-btn');
 
 const STORAGE_KEY      = 'llm-cluster-backend-url';
@@ -63,6 +64,7 @@ if (workspace === 'undefined' || workspace === 'null') {
 }
 let abortRef      = { aborted: false };
 let remembered    = new Set(); // "toolName:pathPrefix" approved this conversation
+let latestLedgerDetail = 'No active ledger yet.';
 
 function updateSessionTokensDisplay() {
   sessionTokensEl.textContent = `in: ${sessionTokens.prompt} · out: ${sessionTokens.response}`;
@@ -238,6 +240,18 @@ activityClose.addEventListener('click', () => {
   chat.querySelectorAll('.activity-row.active').forEach(el => el.classList.remove('active'));
 });
 
+function updateLedgerView(detail) {
+  latestLedgerDetail = detail || 'No active ledger yet.';
+}
+
+ledgerBtn.addEventListener('click', () => {
+  activityTitle.textContent = 'Task Ledger';
+  activitySubtitle.textContent = 'Planned, written, pending, and failed files';
+  activityDetail.textContent = latestLedgerDetail;
+  activityPanel.classList.remove('hidden');
+  chat.querySelectorAll('.activity-row.active').forEach(el => el.classList.remove('active'));
+});
+
 // --- mDNS Discovery ---
 
 async function discover() {
@@ -366,6 +380,7 @@ async function sendCode(prompt) {
       chat,
       appendBubble: (...args) => { ensurePlaceholderRemoved(); return appendBubble(...args); },
       appendActivity: (activity) => { ensurePlaceholderRemoved(); return appendActivity(activity); },
+      updateLedgerView,
       setLoading: (on) => {
         if (on && !placeholderRemoved) {
           // placeholder already showing
@@ -414,6 +429,7 @@ function newChat() {
   chat.innerHTML = '';
   activityPanel.classList.add('hidden');
   activityDetail.textContent = '';
+  latestLedgerDetail = 'No active ledger yet.';
   stopBtn.classList.add('hidden');
   input.focus();
 }
