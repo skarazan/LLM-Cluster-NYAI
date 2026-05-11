@@ -269,11 +269,17 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       }
 
       const hint = salvaged
-        ? `\nThe model was trying to ${salvaged.tool}("${salvaged.path}") but the content was too large.`
+        ? `\nThe model was trying to ${salvaged.tool}("${salvaged.path}") but the JSON parser crashed on escaped quotes.`
+        : '';
+
+      const isHtml = errBody.includes('DOCTYPE') || errBody.includes('<html') || (salvaged && salvaged.path && /\.html?$/i.test(salvaged.path));
+
+      const htmlFix = isHtml
+        ? `\nCRITICAL: HTML attributes with double quotes (charset="UTF-8") CRASH the JSON parser. Use SINGLE QUOTES for ALL HTML attributes: charset='UTF-8', name='viewport', etc.`
         : '';
 
       return {
-        content: `ERROR: Tool call JSON was truncated — content too large for a single call.${hint}\nYou MUST split large files:\n1. write_file with ONLY the first 50 lines\n2. append_file for each next 50 lines\n3. Each call MUST be under 1500 characters of content.\nDo NOT attempt to write the entire file in one call. Continue now.`,
+        content: `ERROR: Tool call JSON was truncated.${hint}${htmlFix}\nYou MUST:\n1. Use SINGLE QUOTES for all HTML attributes (not double quotes)\n2. Split files into 50-line chunks: write_file first 50 lines, then append_file\n3. Keep each call under 1500 characters.\nContinue now.`,
         tool_calls: null,
         tokens: { prompt: 0, response: 0, total: 0, tokensPerSec: null },
       };
