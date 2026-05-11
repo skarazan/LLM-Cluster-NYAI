@@ -239,13 +239,13 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
     if (msgs.length < 10) return msgs;
     if (estimateTokens(msgs) < COMPRESS_THRESHOLD) return msgs;
     // Don't compress too frequently
-    if (Date.now() - lastCompressedAt < 30000) return msgs;
+    if (Date.now() - lastCompressedAt < 120000) return msgs;
 
-    // Extract middle turns to summarize (keep system, first user, last 4)
+    // Extract middle turns to summarize (keep system, first user, last 8)
     const head = msgs.slice(0, 2);  // system + original task
-    const tail = msgs.slice(-4);     // recent context
-    const middle = msgs.slice(2, -4);
-    if (middle.length < 4) return msgs;
+    const tail = msgs.slice(-8);     // recent context (2-3 tool call cycles)
+    const middle = msgs.slice(2, -8);
+    if (middle.length < 6) return msgs;
 
     // Build a compact summary of what happened
     const actions = [];
