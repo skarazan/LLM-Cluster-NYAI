@@ -66,12 +66,25 @@ const TOOL_DEFINITIONS = [
   // ── Tier B: mutating ───────────────────────────────────────────────
   {
     name: 'write_file',
-    description: 'Write full content to a file. ONLY use this to CREATE new files that do not exist yet. NEVER use this to modify an existing file — use edit_file instead. Overwriting an existing file with write_file wastes tokens and risks losing content. For any existing file, always use edit_file.',
+    description: 'Write content to a file. ONLY for creating NEW files. Content MUST be under 2500 characters. For files longer than 2500 chars, write the first part with write_file then use append_file for the rest. NEVER use this to modify an existing file — use edit_file instead.',
     parameters: {
       type: 'object',
       properties: {
         path:    { type: 'string', description: 'Path to the file (relative to workspace root or absolute).' },
-        content: { type: 'string', description: 'Full content to write. Only used when creating a new file.' },
+        content: { type: 'string', description: 'Content to write. MUST be under 2500 characters.', maxLength: 2500 },
+      },
+      required: ['path', 'content'],
+    },
+    risk: 'write',
+  },
+  {
+    name: 'append_file',
+    description: 'Append content to the end of an existing file. Use this after write_file when a new file exceeds 2500 characters — write the first part with write_file, then append the rest in chunks. Each chunk MUST be under 2500 characters.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path:    { type: 'string', description: 'Path to the file to append to.' },
+        content: { type: 'string', description: 'Content to append. MUST be under 2500 characters.', maxLength: 2500 },
       },
       required: ['path', 'content'],
     },

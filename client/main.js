@@ -192,6 +192,14 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         return { ok: true, result: `Written ${check.resolved}` };
       }
 
+      case 'append_file': {
+        if (args.content == null) return { ok: false, error: 'append_file requires "content" argument' };
+        const check = resolveSafe(workspace, args.path);
+        if (!check.ok) return { ok: false, error: check.error };
+        await fs.appendFile(check.resolved, args.content, 'utf8');
+        return { ok: true, result: `Appended to ${check.resolved}` };
+      }
+
       case 'edit_file': {
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };

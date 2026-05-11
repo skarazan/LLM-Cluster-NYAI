@@ -285,7 +285,7 @@ WORKFLOW RULES:
           appendBubble('error', `Tool "${toolName}" failed: ${toolResult.error.split('\n')[0]}`);
         } else {
           // Show a brief success confirmation for write/shell tools
-          const writingTools = ['write_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell'];
+          const writingTools = ['write_file', 'append_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell'];
           if (writingTools.includes(toolName)) {
             let summary;
             if (toolName === 'run_shell' && toolResult.result && typeof toolResult.result === 'object') {
