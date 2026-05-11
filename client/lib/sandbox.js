@@ -21,8 +21,6 @@ const SHELL_DENY = [
   /^mkfs\b/, /^dd\b/, /^fdisk\b/,
   /\bsudo\b/, /\bdoas\b/, /\brunas\b/,
   /^curl\b/, /^wget\b/,
-  /\bnpm\s+install\b/, /\bnpm\s+i\b/, /\bpip\s+install\b/, /\bpip3\s+install\b/,
-  /\byarn\s+add\b/, /\bpnpm\s+add\b/,
   /:\(\)\s*\{/, // fork bomb
 ];
 
