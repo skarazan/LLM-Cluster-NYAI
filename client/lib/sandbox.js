@@ -21,6 +21,7 @@ const SHELL_DENY = [
   /^mkfs\b/, /^dd\b/, /^fdisk\b/,
   /\bsudo\b/, /\bdoas\b/, /\brunas\b/,
   /^curl\b/, /^wget\b/,
+  /\bcat\s*>/, /\becho\s*>/, /\btee\b/, /<<\s*['"]?\w+['"]?/, // no shell file writes — use <write_file> tags
   /:\(\)\s*\{/, // fork bomb
 ];
 

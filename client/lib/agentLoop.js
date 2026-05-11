@@ -181,6 +181,7 @@ FILE WRITING — use XML tags, NOT tool calls:
 - The content goes BETWEEN the tags as raw text. No JSON escaping needed.
 - You can use double quotes freely inside the tags.
 - Do NOT use write_file or append_file as tool calls — ONLY as XML tags in your response text.
+- NEVER use run_shell to write files (no cat >, echo >, heredoc, tee, etc). ONLY <write_file> tags.
 - Use edit_file tool call for modifying existing files (small targeted changes only).
 
 WORKFLOW RULES:
