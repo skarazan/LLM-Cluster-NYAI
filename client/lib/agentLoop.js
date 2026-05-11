@@ -229,16 +229,63 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
     }, 0);
   }
 
-  // Trim history to fit context window.
-  // Budget: leave room for tool schemas (~3K tok) + system prompt (~500 tok) + model output (~4K tok).
   const MAX_CTX_TOKENS = 12000;
-  function trimHistory(msgs) {
-    // Step 1: truncate old tool results, keep last 6 full for active work context
+  const COMPRESS_THRESHOLD = 10000;
+  let lastCompressedAt = 0;
+
+  // Compress old history into a summary via the model
+  async function compressHistory(msgs) {
+    // Need at least system + user + 8 turns to compress
+    if (msgs.length < 10) return msgs;
+    if (estimateTokens(msgs) < COMPRESS_THRESHOLD) return msgs;
+    // Don't compress too frequently
+    if (Date.now() - lastCompressedAt < 30000) return msgs;
+
+    // Extract middle turns to summarize (keep system, first user, last 4)
+    const head = msgs.slice(0, 2);  // system + original task
+    const tail = msgs.slice(-4);     // recent context
+    const middle = msgs.slice(2, -4);
+    if (middle.length < 4) return msgs;
+
+    // Build a compact summary of what happened
+    const actions = [];
+    for (const m of middle) {
+      if (m.role === 'assistant' && m.tool_calls) {
+        for (const tc of m.tool_calls) {
+          const name = tc.function?.name || '';
+          let args = tc.function?.arguments;
+          if (typeof args === 'object') args = JSON.stringify(args);
+          const path = (args || '').match(/"path"\s*:\s*"([^"]+)"/)?.[1] || '';
+          actions.push(`${name}(${path})`);
+        }
+      } else if (m.role === 'assistant' && m.content) {
+        const short = m.content.slice(0, 100).replace(/\n/g, ' ');
+        if (short && !short.startsWith('ERROR')) actions.push(`said: ${short}`);
+      }
+    }
+
+    if (actions.length === 0) return msgs;
+
+    // Build summary locally (no API call — fast and free)
+    const summary = `[Context compressed] Actions completed so far:\n${actions.map((a, i) => `${i + 1}. ${a}`).join('\n')}\n\nContinue from where you left off. Do NOT repeat any of the above actions.`;
+
+    lastCompressedAt = Date.now();
+    appendBubble('assistant', `Context compressed (${middle.length} turns → summary)`);
+
+    return [...head, { role: 'assistant', content: summary }, ...tail];
+  }
+
+  // Trim history to fit context window.
+  async function trimHistory(msgs) {
+    // Step 1: compress if over threshold
+    let trimmed = await compressHistory(msgs);
+
+    // Step 2: truncate old tool results, keep last 4 full
     const MAX_TOOL_RESULT_CHARS = 400;
-    const KEEP_RECENT = 6;
+    const KEEP_RECENT = 4;
     let toolResultsSeen = 0;
-    const total = msgs.filter(m => m.role === 'tool').length;
-    let trimmed = msgs.map(m => {
+    const total = trimmed.filter(m => m.role === 'tool').length;
+    trimmed = trimmed.map(m => {
       if (m.role !== 'tool') return m;
       toolResultsSeen++;
       const isRecent = toolResultsSeen > total - KEEP_RECENT;
@@ -249,7 +296,7 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       return m;
     });
 
-    // Step 2: truncate old assistant tool_calls args (write_file content is huge)
+    // Step 3: truncate old assistant tool_calls args
     for (let i = 0; i < trimmed.length - 6; i++) {
       const m = trimmed[i];
       if (m.role === 'assistant' && m.tool_calls) {
@@ -270,8 +317,7 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       }
     }
 
-    // Step 3: drop oldest middle turns if still over budget.
-    // Keep: index 0 (system), index 1 (original task), last 4.
+    // Step 4: drop oldest middle turns if still over budget
     while (estimateTokens(trimmed) > MAX_CTX_TOKENS && trimmed.length > 6) {
       trimmed.splice(2, 1);
     }
@@ -287,7 +333,7 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
 
     // Send to backend
     setLoading(true);
-    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: trimHistory(history), model, tools });
+    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: await trimHistory(history), model, tools });
     setLoading(false);
 
     // Remove stream bubble now that we have the final response
