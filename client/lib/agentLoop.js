@@ -387,6 +387,7 @@ function extractToolCallsFromText(text, history = []) {
       if (obj.name && (obj.arguments || obj.parameters)) {
         calls.push({
           id: `fallback_${idCounter++}`,
+          type: 'function',
           function: { name: obj.name, arguments: obj.arguments || obj.parameters },
         });
       }
@@ -400,6 +401,7 @@ function extractToolCallsFromText(text, history = []) {
     if (obj.name && (obj.arguments || obj.parameters)) {
       calls.push({
         id: `fallback_${idCounter++}`,
+        type: 'function',
         function: { name: obj.name, arguments: obj.arguments || obj.parameters },
       });
     }
@@ -441,6 +443,7 @@ function extractToolCallsFromText(text, history = []) {
     if (filename && SOURCE_EXTS.test(filename)) {
       calls.push({
         id: `fallback_${idCounter++}`,
+        type: 'function',
         function: { name: 'write_file', arguments: { path: filename, content } },
       });
     }
