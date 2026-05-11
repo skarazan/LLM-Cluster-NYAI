@@ -247,19 +247,39 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
     const middle = msgs.slice(2, -8);
     if (middle.length < 6) return msgs;
 
-    // Build a compact summary of what happened
+    // Build a compact summary with meaningful detail from each action
     const actions = [];
     for (const m of middle) {
       if (m.role === 'assistant' && m.tool_calls) {
         for (const tc of m.tool_calls) {
           const name = tc.function?.name || '';
-          let args = tc.function?.arguments;
-          if (typeof args === 'object') args = JSON.stringify(args);
-          const path = (args || '').match(/"path"\s*:\s*"([^"]+)"/)?.[1] || '';
-          actions.push(`${name}(${path})`);
+          let rawArgs = tc.function?.arguments;
+          if (typeof rawArgs === 'string') { try { rawArgs = JSON.parse(rawArgs); } catch { rawArgs = {}; } }
+          const args = rawArgs || {};
+          const path = args.path || '';
+          if (name === 'write_file' && args.content) {
+            const lines = args.content.split('\n');
+            const preview = lines.slice(0, 5).join(' ').slice(0, 150);
+            actions.push(`write_file(${path}) — ${lines.length} lines: ${preview}…`);
+          } else if (name === 'append_file' && args.content) {
+            actions.push(`append_file(${path}) — ${args.content.split('\n').length} lines appended`);
+          } else if (name === 'edit_file') {
+            const oldSnip = (args.old_string || '').slice(0, 60).replace(/\n/g, ' ');
+            const newSnip = (args.new_string || '').slice(0, 60).replace(/\n/g, ' ');
+            actions.push(`edit_file(${path}) — "${oldSnip}" → "${newSnip}"`);
+          } else if (name === 'run_shell') {
+            const cmd = [args.cmd, ...(args.args || [])].join(' ').slice(0, 100);
+            actions.push(`run_shell: ${cmd}`);
+          } else if (name === 'grep') {
+            actions.push(`grep("${args.pattern}" in ${args.path || 'workspace'})`);
+          } else if (name === 'read_file') {
+            actions.push(`read_file(${path})`);
+          } else {
+            actions.push(`${name}(${path})`);
+          }
         }
       } else if (m.role === 'assistant' && m.content) {
-        const short = m.content.slice(0, 100).replace(/\n/g, ' ');
+        const short = m.content.slice(0, 150).replace(/\n/g, ' ');
         if (short && !short.startsWith('ERROR')) actions.push(`said: ${short}`);
       }
     }
