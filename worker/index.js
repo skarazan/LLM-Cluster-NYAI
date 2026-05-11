@@ -238,6 +238,18 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   if (!res.ok) {
     const errBody = await res.text().catch(() => '(unreadable)');
     console.error(`[job] ${engine.type} error body: ${errBody.slice(0, 1000)}`);
+
+    // llama.cpp returns 500 when tool call args JSON is too long / truncated.
+    // Return as assistant content so the model can retry with smaller args.
+    if (res.status === 500 && errBody.includes('Failed to parse tool call arguments')) {
+      console.warn('[job] tool call args too large for llama.cpp JSON parser — returning error as content');
+      return {
+        content: 'ERROR: Your previous tool call failed because the arguments were too large (>4000 chars) and the JSON was truncated. Do NOT use write_file with large content. Instead:\n1. Use edit_file to make targeted changes to existing files\n2. For new files, break them into multiple smaller write_file calls\n3. Keep each tool call under 3000 characters of content',
+        tool_calls: null,
+        tokens: { prompt: 0, response: 0, total: 0, tokensPerSec: null },
+      };
+    }
+
     throw new Error(`${engine.type} HTTP ${res.status}: ${errBody.slice(0, 500)}`);
   }
 
