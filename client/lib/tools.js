@@ -66,12 +66,12 @@ const TOOL_DEFINITIONS = [
   // ── Tier B: mutating ───────────────────────────────────────────────
   {
     name: 'write_file',
-    description: 'Write content to a file. ONLY for creating NEW files. Content MUST be under 2500 characters. For files longer than 2500 chars, write the first part with write_file then use append_file for the rest. NEVER use this to modify an existing file — use edit_file instead.',
+    description: 'Create a new file with content. MAXIMUM 80 lines per call. For longer files, write first 80 lines here, then use append_file for remaining chunks of 80 lines each. NEVER use for existing files — use edit_file.',
     parameters: {
       type: 'object',
       properties: {
         path:    { type: 'string', description: 'Path to the file (relative to workspace root or absolute).' },
-        content: { type: 'string', description: 'Content to write. MUST be under 2500 characters.', maxLength: 2500 },
+        content: { type: 'string', description: 'Content to write. MAX 80 lines. Use append_file for rest.', maxLength: 2500 },
       },
       required: ['path', 'content'],
     },
@@ -79,7 +79,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'append_file',
-    description: 'Append content to the end of an existing file. Use this after write_file when a new file exceeds 2500 characters — write the first part with write_file, then append the rest in chunks. Each chunk MUST be under 2500 characters.',
+    description: 'Append content to end of existing file. MAX 80 lines per call. Use after write_file to continue writing a long file in chunks.',
     parameters: {
       type: 'object',
       properties: {
