@@ -89,7 +89,7 @@ function deregisterWorker(id) {
   if (!worker) return false;
   // Wake any waiting pollers so they exit cleanly
   for (const waiter of worker.waiters) {
-    waiter.res.json({ job: null });
+    try { if (!waiter.res.headersSent) waiter.res.json({ job: null }); else waiter.res.end(); } catch {}
   }
   worker.waiters = [];
   workers.delete(id);

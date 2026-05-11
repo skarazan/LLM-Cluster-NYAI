@@ -224,7 +224,7 @@ ${approvedPlan}
 
   // Trim history to fit context window.
   // Budget: leave room for tool schemas (~3K tok) + system prompt (~500 tok) + model output (~4K tok).
-  const MAX_CTX_TOKENS = 20000;
+  const MAX_CTX_TOKENS = 12000;
   function trimHistory(msgs) {
     // Step 1: truncate old tool results, keep last 6 full for active work context
     const MAX_TOOL_RESULT_CHARS = 400;
