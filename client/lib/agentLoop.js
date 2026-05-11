@@ -26,6 +26,105 @@ const ALWAYS_CONFIRM = new Set(['delete_file', 'run_shell']);
  *   - remembered {Set}     set of "toolName:pathPrefix" already approved this conversation
  * @returns {array} updated messages array
  */
+/**
+ * Ask the model to create a plan before executing. Returns the plan text
+ * or null if user rejects / aborts.
+ */
+async function requestPlan(opts) {
+  const { backendUrl, messages, model, workspace, chat, appendBubble, setLoading, abortRef } = opts;
+
+  const userTask = messages[messages.length - 1]?.content || '';
+  const planMessages = [
+    {
+      role: 'system',
+      content: `You are a coding assistant planning a task. The workspace is "${workspace}".
+Create a concise, numbered plan for the task below. List each file to create/modify and what it will contain. Do NOT write any code — just the plan. Keep it brief.`,
+    },
+    { role: 'user', content: userTask },
+  ];
+
+  setLoading(true);
+  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: planMessages, model });
+  setLoading(false);
+
+  if (abortRef.aborted || !r.ok) return null;
+
+  let planText = r.data.response || '';
+  // Strip thinking blocks
+  planText = planText.replace(/<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/g, '').trim();
+  if (!planText) return null;
+
+  return planText;
+}
+
+/**
+ * Show plan approval card. Returns promise that resolves to 'approve', 'reject', or 'edit:<text>'.
+ */
+function showPlanApproval(chat, planText) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'bubble approval plan-approval';
+
+    const header = document.createElement('div');
+    header.className = 'approval-header';
+    header.innerHTML = '<span class="approval-icon">📋</span><span><strong>Proposed Plan</strong></span>';
+    wrap.appendChild(header);
+
+    const body = document.createElement('pre');
+    body.className = 'plan-body';
+    body.textContent = planText;
+    wrap.appendChild(body);
+
+    const actions = document.createElement('div');
+    actions.className = 'approval-actions';
+
+    const btnApprove = document.createElement('button');
+    btnApprove.className = 'approval-btn approve';
+    btnApprove.textContent = 'Execute Plan';
+    btnApprove.addEventListener('click', () => {
+      wrap.querySelectorAll('button').forEach(b => b.disabled = true);
+      resolve('approve');
+    });
+
+    const btnEdit = document.createElement('button');
+    btnEdit.className = 'approval-btn remember';
+    btnEdit.textContent = 'Edit Plan';
+    btnEdit.addEventListener('click', () => {
+      wrap.querySelectorAll('button').forEach(b => b.disabled = true);
+      body.contentEditable = 'true';
+      body.classList.add('editing');
+      body.focus();
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'approval-btn approve';
+      saveBtn.textContent = 'Save & Execute';
+      saveBtn.addEventListener('click', () => {
+        saveBtn.disabled = true;
+        body.contentEditable = 'false';
+        body.classList.remove('editing');
+        resolve('edit:' + body.textContent);
+      });
+      actions.innerHTML = '';
+      actions.appendChild(saveBtn);
+    });
+
+    const btnReject = document.createElement('button');
+    btnReject.className = 'approval-btn reject';
+    btnReject.textContent = 'Reject';
+    btnReject.addEventListener('click', () => {
+      wrap.querySelectorAll('button').forEach(b => b.disabled = true);
+      resolve('reject');
+    });
+
+    actions.appendChild(btnApprove);
+    actions.appendChild(btnEdit);
+    actions.appendChild(btnReject);
+    wrap.appendChild(actions);
+
+    chat.appendChild(wrap);
+    chat.scrollTop = chat.scrollHeight;
+  });
+}
+
 async function runAgentTurn(opts) {
   const {
     backendUrl, messages, model, tools,
@@ -34,8 +133,25 @@ async function runAgentTurn(opts) {
     abortRef, remembered,
   } = opts;
 
-  // Prepend a system message so the model knows the workspace root
-  // Replace or insert at index 0
+  // ── Plan Phase ──────────────────────────────────────────────────────
+  appendBubble('assistant', 'Creating plan…');
+  const planText = await requestPlan(opts);
+
+  if (!planText || abortRef.aborted) {
+    appendBubble('error', 'Failed to generate plan.');
+    return messages;
+  }
+
+  const decision = await showPlanApproval(chat, planText);
+  if (decision === 'reject') {
+    appendBubble('error', 'Plan rejected.');
+    return messages;
+  }
+
+  const approvedPlan = decision.startsWith('edit:') ? decision.slice(5) : planText;
+  appendBubble('assistant', '✓ Plan approved. Executing…');
+
+  // ── Execution Phase ─────────────────────────────────────────────────
   let history = [...messages];
   const toolNames = tools.map(t => t.function?.name || t.name).join(', ');
   const systemMsg = {
@@ -59,6 +175,10 @@ WORKFLOW RULES:
 3. After each tool result, immediately call the next tool needed. Do NOT summarize progress or ask for confirmation — just continue.
 4. Do not create fake commands and do not forget slashes between files in directories.
 5. When the task is fully complete, say "Done." with a brief summary of what was created/modified. This is the ONLY time you should stop.
+6. Do NOT re-read files you have already read. Do NOT repeat tool calls.
+
+APPROVED PLAN — execute this exactly:
+${approvedPlan}
 `,
   };
   if (history.length > 0 && history[0].role === 'system') {

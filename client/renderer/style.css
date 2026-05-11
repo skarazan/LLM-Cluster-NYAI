@@ -286,6 +286,27 @@ footer button:disabled { opacity: 0.4; cursor: not-allowed; }
 .approval-btn.reject:hover    { background: #f7768e44; }
 .approval-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* ── Plan approval ───────────────────────────────────────────────────────── */
+.plan-approval { max-width: 85%; }
+.plan-body {
+  background: #1e2030;
+  border: 1px solid #3b4261;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  max-height: 400px;
+  overflow-y: auto;
+  color: #c0caf5;
+}
+.plan-body.editing {
+  border-color: #7aa2f7;
+  outline: none;
+  background: #24283b;
+}
+
 /* ── Thinking block ───────────────────────────────────────────────────────── */
 .thinking-block {
   align-self: flex-start;
