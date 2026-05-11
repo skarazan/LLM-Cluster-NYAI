@@ -67,6 +67,7 @@ WORKFLOW RULES:
   }
 
   let toolCallCount = 0;
+  let overflowRetries = 0;
 
   // Live stream bubble — shows tokens as they arrive via IPC 'stream-chunk'
   let activeStreamEl = null;
@@ -153,9 +154,14 @@ WORKFLOW RULES:
       }
     }
 
-    // Tool call overflow error from worker — inject as user feedback and retry
+    // Tool call overflow error from worker — inject as user feedback and retry (max 2)
     if (!data.tool_calls && data.response && data.response.startsWith('ERROR: Your previous tool call failed')) {
-      appendBubble('error', 'Tool call too large — retrying with guidance to use smaller writes…');
+      overflowRetries++;
+      if (overflowRetries > 2) {
+        appendBubble('error', 'Tool call overflow repeated 3 times — stopping. Model cannot fit file content within llama.cpp limits.');
+        break;
+      }
+      appendBubble('error', `Tool call too large — retry ${overflowRetries}/2…`);
       history.push({ role: 'assistant', content: data.response });
       history.push({ role: 'user', content: 'The tool call failed because the content was too large. You MUST use edit_file for existing files or split new files into chunks under 3000 characters. Do NOT attempt write_file with large content again. Continue the task.' });
       continue;
