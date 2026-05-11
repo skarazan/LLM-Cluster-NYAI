@@ -92,15 +92,25 @@ WORKFLOW RULES:
   };
   ipcRenderer.on('stream-chunk', onStreamChunk);
 
-  // Trim tool result content to prevent context explosion across multi-turn tool calls.
-  // Tool results (file contents etc.) can be huge; keep only the first 500 chars of old ones.
+  // Estimate rough token count (~4 chars per token)
+  function estimateTokens(msgs) {
+    return msgs.reduce((sum, m) => {
+      let len = (m.content || '').length;
+      if (m.tool_calls) len += JSON.stringify(m.tool_calls).length;
+      return sum + Math.ceil(len / 4);
+    }, 0);
+  }
+
+  // Trim history to fit context: truncate old tool results, then drop old turns if still too big.
+  // MAX_CTX_TOKENS reserves room for tool schemas (~2K tok) + system prompt + model output.
+  const MAX_CTX_TOKENS = 10000;
   function trimHistory(msgs) {
+    // Step 1: truncate old tool result content
     const MAX_TOOL_RESULT_CHARS = 500;
-    const KEEP_RECENT = 4; // always keep last N tool results untruncated
+    const KEEP_RECENT = 4;
     let toolResultsSeen = 0;
-    // count total tool results first
     const total = msgs.filter(m => m.role === 'tool').length;
-    return msgs.map(m => {
+    let trimmed = msgs.map(m => {
       if (m.role !== 'tool') return m;
       toolResultsSeen++;
       const isRecent = toolResultsSeen > total - KEEP_RECENT;
@@ -110,6 +120,14 @@ WORKFLOW RULES:
       }
       return m;
     });
+
+    // Step 2: if still over budget, drop oldest non-system turns
+    while (estimateTokens(trimmed) > MAX_CTX_TOKENS && trimmed.length > 4) {
+      // Always keep index 0 (system) and last 3 messages
+      trimmed.splice(1, 1);
+    }
+
+    return trimmed;
   }
 
   while (true) {
