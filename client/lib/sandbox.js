@@ -21,6 +21,7 @@ const SHELL_DENY = [
   /^mkfs\b/, /^dd\b/, /^fdisk\b/,
   /\bsudo\b/, /\bdoas\b/, /\brunas\b/,
   /^curl\b/, /^wget\b/,
+  /^open\b/, /^start\b/, /^xdg-open\b/, // don't let model open browser/apps
   /:\(\)\s*\{/, // fork bomb
 ];
 
