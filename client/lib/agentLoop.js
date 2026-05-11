@@ -5,9 +5,12 @@ const { buildApprovalCard } = require('../renderer/components/approvalCard');
 const { getTool }       = require('./tools');
 
 const MAX_TOOL_CALLS = Infinity;
+const WRITE_CHUNK_LINES = 80;
+const WRITE_CHUNK_CHARS = 6000;
 
 // Tools that can never be auto-approved or remembered
 const ALWAYS_CONFIRM = new Set(['delete_file', 'run_shell']);
+const TEXT_WRITE_TOOLS = new Set(['write_file', 'append_file']);
 
 /**
  * Run one full agent turn.
@@ -129,9 +132,13 @@ async function runAgentTurn(opts) {
   const {
     backendUrl, messages, model, tools,
     workspace, approvalMode, planMode,
-    chat, appendBubble, setLoading,
+    chat, appendBubble, appendActivity, setLoading,
     abortRef, remembered,
   } = opts;
+  const addActivity = (activity) => {
+    if (typeof appendActivity === 'function') return appendActivity(activity);
+    return appendBubble(activity.status === 'error' ? 'error' : 'assistant', activity.title || activity.subtitle || 'Activity');
+  };
 
   // ── Plan Phase (only when toggled on) ───────────────────────────────
   let approvedPlan = null;
@@ -156,9 +163,11 @@ async function runAgentTurn(opts) {
 
   // ── Execution Phase ─────────────────────────────────────────────────
   let history = [...messages];
+  const taskLedger = createTaskLedger(messages, approvedPlan, workspace);
+  const failureFingerprints = new Map();
   const toolCallNames = tools.filter(t => {
     const n = t.function?.name || t.name;
-    return n !== 'write_file' && n !== 'append_file';
+    return !TEXT_WRITE_TOOLS.has(n);
   }).map(t => t.function?.name || t.name).join(', ');
   const systemMsg = {
     role: 'system',
@@ -177,6 +186,11 @@ CRITICAL PATH RULES — NEVER violate:
 FILE WRITING — use XML tags, NOT tool calls:
 - To create/write a file, output: <write_file path="${workspace}/path/to/file">content here</write_file>
 - To append to a file, output: <append_file path="${workspace}/path/to/file">content here</append_file>
+- Safer alternative for large files:
+  <<<FILE path="${workspace}/path/to/file" mode="write">
+  content here
+  <<<END_FILE
+- For appends use mode="append".
 - For files over 80 lines: use <write_file> for first 80 lines, then <append_file> for rest.
 - The content goes BETWEEN the tags as raw text. No JSON escaping needed.
 - You can use double quotes freely inside the tags.
@@ -193,6 +207,7 @@ WORKFLOW RULES:
 5. When the task is fully complete, say "Done." with a brief summary of what was created/modified. This is the ONLY time you should stop.
 6. Do NOT re-read files you have already read. Do NOT repeat tool calls.
 ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : ''}
+${formatLedgerForPrompt(taskLedger)}
 `,
   };
   if (history.length > 0 && history[0].role === 'system') {
@@ -203,6 +218,10 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
 
   let toolCallCount = 0;
   let overflowRetries = 0;
+  let forceTextWriteOnly = false;
+  let plainContinuationCount = 0;
+  let incompleteWriteRetries = 0;
+  let emptyContinuationCount = 0;
 
   // Live stream bubble — shows tokens as they arrive via IPC 'stream-chunk'
   let activeStreamEl = null;
@@ -223,8 +242,8 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
     let display = raw
       .replace(/<(think|thinking|reasoning)>\s*/g, '💭 ')
       .replace(/\s*<\/(think|thinking|reasoning)>/g, '\n─────\n')
-      .replace(/<(write_file|append_file)\s+path="([^"]*)">[^]*?<\/\1>/g, '📝 Writing $2…\n')
-      .replace(/<(write_file|append_file)\s+path="([^"]*)">[^]*$/g, '📝 Writing $2…');
+      .replace(/<(write_file|append_file)\s+path=(["'])([^"']*)\2>[^]*?<\/\1>/g, '📝 Writing $3…\n')
+      .replace(/<(write_file|append_file)\s+path=(["'])([^"']*)\2>[^]*$/g, '📝 Writing $3…');
     body.textContent = display;
     chat.scrollTop = chat.scrollHeight;
   };
@@ -361,13 +380,18 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
     // Remove any previous stream bubble before starting a new request
     if (activeStreamEl) { activeStreamEl.remove(); activeStreamEl = null; }
 
-    // Send to backend — filter out write_file/append_file from tools (use XML tags instead)
-    const filteredTools = tools.filter(t => {
+    // Send to backend — filter out file-body tools. Large source code is
+    // streamed as text and written locally, never as llama.cpp tool-call JSON.
+    const filteredTools = forceTextWriteOnly ? [] : tools.filter(t => {
       const name = t.function?.name || t.name;
-      return name !== 'write_file' && name !== 'append_file';
+      return !TEXT_WRITE_TOOLS.has(name);
     });
+    const outgoingMessages = injectLedgerStatus(
+      sanitizeHistoryForTools(await trimHistory(history), filteredTools),
+      taskLedger,
+    );
     setLoading(true);
-    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: await trimHistory(history), model, tools: filteredTools });
+    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: outgoingMessages, model, tools: filteredTools });
     setLoading(false);
 
     // Remove stream bubble now that we have the final response
@@ -392,42 +416,76 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       }
       data.response = data.response.replace(thinkRe, '').trim();
     }
-    // Extract <write_file> and <append_file> XML tags from response text
+    // Extract file-write blocks from response text and execute them locally.
+    // These never become native tool calls because llama.cpp's JSON parser is
+    // fragile with large escaped source files.
     if (data.response) {
-      const writeRe = /<(write_file|append_file)\s+path="([^"]+)">([\s\S]*?)<\/\1>/g;
-      const writeMatches = [...data.response.matchAll(writeRe)];
-      for (const wm of writeMatches) {
-        const [fullMatch, tagName, filePath, content] = wm;
-        const lines = content.split('\n');
-        // Auto-chunk if over 80 lines
-        const chunks = [];
-        for (let i = 0; i < lines.length; i += 80) {
-          chunks.push(lines.slice(i, i + 80).join('\n'));
-        }
-        const firstTool = tagName === 'append_file' ? 'append_file' : 'write_file';
-        let result = await ipcRenderer.invoke('agent:run-tool', {
-          tool: firstTool, args: { path: filePath, content: chunks[0] }, workspace,
-        });
-        for (let c = 1; c < chunks.length && result.ok; c++) {
-          result = await ipcRenderer.invoke('agent:run-tool', {
-            tool: 'append_file', args: { path: filePath, content: '\n' + chunks[c] }, workspace,
-          });
-        }
+      const writeBlocks = extractTextWriteBlocks(data.response, history);
+      for (const block of writeBlocks) {
+        const result = await executeTextWriteBlock(block, workspace);
         if (result.ok) {
-          const parts = chunks.length > 1 ? ` (${lines.length} lines, auto-chunked ${chunks.length} parts)` : '';
-          appendBubble('assistant', `✓ ${filePath}${parts}`);
+          markLedgerWritten(taskLedger, block.path);
+          const parts = result.chunks > 1 ? ` (${result.lines} lines, auto-chunked ${result.chunks} parts)` : '';
+          addActivity({
+            kind: 'write',
+            status: 'success',
+            title: `Wrote ${shortPath(block.path)}${parts}`,
+            subtitle: block.path,
+            detail: {
+              path: block.path,
+              tool: block.tool,
+              status: 'written',
+              lines: result.lines,
+              chunks: result.chunks,
+              preview: previewText(block.content),
+              result: result.result,
+            },
+          });
           toolCallCount++;
         } else {
-          appendBubble('error', `File write failed: ${result.error}`);
+          markLedgerFailed(taskLedger, block.path, result.error);
+          addActivity({
+            kind: 'write',
+            status: 'error',
+            title: `Failed writing ${shortPath(block.path)}`,
+            subtitle: block.path,
+            detail: { path: block.path, tool: block.tool, status: 'failed', error: result.error, preview: previewText(block.content) },
+          });
+          if (recordRepeatedFailure(failureFingerprints, 'text_write', block.path, result.error) >= 3) {
+            appendBubble('error', `Repeated write failure for ${block.path} — stopping to avoid a loop.`);
+            break;
+          }
         }
-        history.push({ role: 'assistant', content: `Wrote ${filePath} (${lines.length} lines)` });
+        history.push({
+          role: 'assistant',
+          content: result.ok
+            ? `Wrote ${block.path} (${result.lines || 0} lines)`
+            : `Failed to write ${block.path}: ${result.error}`,
+        });
       }
-      // Strip the XML tags from response text
-      if (writeMatches.length > 0) {
-        data.response = data.response.replace(writeRe, '').trim();
+      if (writeBlocks.length > 0) {
+        data.response = stripTextWriteBlocks(data.response).trim();
         overflowRetries = 0;
+        forceTextWriteOnly = false;
         // If there was only file writes and no other content, loop for next action
         if (!data.response && !data.tool_calls) continue;
+      }
+
+      const incompleteWrite = findIncompleteTextWriteBlock(data.response);
+      if (incompleteWrite) {
+        incompleteWriteRetries++;
+        if (incompleteWriteRetries > 2) {
+          appendBubble('error', `Incomplete file write for ${incompleteWrite.path || 'unknown file'} repeated ${incompleteWriteRetries} times — stopping.`);
+          break;
+        }
+        appendBubble('error', `Incomplete file write detected — retry ${incompleteWriteRetries}/2…`);
+        forceTextWriteOnly = true;
+        history.push({ role: 'assistant', content: stripLargeIncompleteWrite(data.response) });
+        history.push({
+          role: 'user',
+          content: `Your previous <${incompleteWrite.tool}> block${incompleteWrite.path ? ` for "${incompleteWrite.path}"` : ''} was cut off before the closing tag, so it was NOT written. Re-send that file now using only complete XML blocks. Prefer smaller chunks: <write_file path="...">first chunk</write_file> then <append_file path="...">next chunk</append_file>. Do not use JSON tools and do not say Done.`,
+        });
+        continue;
       }
     }
 
@@ -447,8 +505,9 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
         break;
       }
       appendBubble('error', `Tool call too large — retry ${overflowRetries}/2…`);
+      forceTextWriteOnly = true;
       history.push({ role: 'assistant', content: data.response });
-      history.push({ role: 'user', content: 'CRITICAL: Tool call JSON crashed. You MUST:\n1. Use SINGLE QUOTES for all HTML attributes (not double quotes)\n2. write_file with ONLY first 50 lines, then append_file for each next 50\n3. Each call under 1500 chars.\nIf task is already complete, say "Done." instead.' });
+      history.push({ role: 'user', content: 'CRITICAL: Native JSON tool calling crashed while trying to write a file. For the next response, DO NOT call any tools. Output only file-write text blocks like <write_file path="' + workspace + '/path/to/file.js">...</write_file> or <append_file path="' + workspace + '/path/to/file.js">...</append_file>. Put the full code between the tags as plain text. If the task is already complete, say "Done." instead.' });
       continue;
     }
 
@@ -477,14 +536,66 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       const respNorm = rawResp.toLowerCase().trim();
       const resp = meaningless.has(respNorm) ? '' : rawResp;
 
-      // If model returned empty text after completing tool calls, show a completion message
-      const displayResp = resp || (toolCallCount > 0 ? 'Done.' : '');
+      if (isPrematureDone(resp, taskLedger)) {
+        history.push({ role: 'assistant', content: resp });
+        history.push({
+          role: 'user',
+          content: `You said Done, but the task ledger still has unfinished work:\n${formatLedgerForPrompt(taskLedger)}\nContinue now. Emit the next tool call or complete file block. Do not say Done until pending and failed files are resolved.`,
+        });
+        continue;
+      }
+
+      if (resp && /\bdone\b|completed|finished|all set/i.test(resp)) {
+        const verification = await verifyLedgerFiles(taskLedger, workspace);
+        if (!verification.ok) {
+          for (const item of verification.failed) markLedgerFailed(taskLedger, item.path, item.error);
+          history.push({ role: 'assistant', content: resp });
+          history.push({
+            role: 'user',
+            content: `You said Done, but local verification failed:\n${verification.failed.map(f => `- ${f.path}: ${f.error}`).join('\n')}\nFix these files now. Do not say Done until verification passes.`,
+          });
+          continue;
+        }
+      }
+
+      if (data.finish_reason && isTruncatedFinish(data.finish_reason) && toolCallCount > 0) {
+        history.push({ role: 'assistant', content: resp || `[Generation stopped early: ${data.finish_reason}]` });
+        history.push({
+          role: 'user',
+          content: `The previous response stopped because finish_reason="${data.finish_reason}". Continue exactly where it stopped. If writing a file, resend the current file using smaller complete <write_file>/<append_file> blocks. Do not say Done until all requested work is complete.`,
+        });
+        forceTextWriteOnly = true;
+        continue;
+      }
+
+      if (!resp && toolCallCount > 0 && emptyContinuationCount < 2) {
+        emptyContinuationCount++;
+        history.push({ role: 'assistant', content: '' });
+        history.push({
+          role: 'user',
+          content: 'Continue executing the task. Your previous response was empty, so nothing new was done. Emit the next tool call or complete <write_file>/<append_file> blocks. Say "Done." only after all requested files and steps are complete.',
+        });
+        continue;
+      }
+
+      if (resp && shouldContinueAfterPlainResponse(resp, toolCallCount, plainContinuationCount)) {
+        plainContinuationCount++;
+        appendBubble('assistant', resp, meta);
+        history.push({ role: 'assistant', content: resp });
+        history.push({
+          role: 'user',
+          content: 'Continue executing the task now. Do not narrate progress only. Either emit the next tool call, emit <write_file>/<append_file> blocks for the next file, or say "Done." only if every requested file and step is complete.',
+        });
+        continue;
+      }
+
+      const displayResp = resp || 'Stopped: model returned an empty response before confirming completion.';
       appendBubble('assistant', displayResp, meta);
       history.push({ role: 'assistant', content: displayResp });
       if (pendingThinkText) appendThinkingBlock(chat, pendingThinkText);
       ipcRenderer.removeListener('stream-chunk', onStreamChunk);
       // Strip the injected system message before returning — renderer stores clean history
-      return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant.')));
+      return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant')));
     }
 
     // Has tool calls — show approval cards and execute
@@ -506,6 +617,11 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       toolCallCount++;
 
       const toolName = call.function?.name || call.name;
+      if (TEXT_WRITE_TOOLS.has(toolName)) {
+        appendBubble('error', `Tool "${toolName}" is disabled as a native tool. Use <${toolName} path="...">...</${toolName}> text blocks instead.`);
+        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: `${toolName} is not available as a JSON tool because large file contents break llama.cpp parsing. Emit XML write blocks in assistant text instead.` }) });
+        continue;
+      }
       // llama.cpp / OpenAI format returns arguments as a JSON *string*; Ollama returns a parsed object.
       // Always normalise to an object here.
       let rawArgs = call.function?.arguments ?? call.arguments ?? {};
@@ -560,26 +676,37 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
           if (readResult.ok) {
             toolResult = {
               ok: false,
-              error: `old_string not found. Current file content:\n${readResult.result}\n\nUse write_file to rewrite the whole file with your changes applied.`,
+              error: `old_string not found. Current file content:\n${readResult.result}\n\nUse a <write_file path="...">...</write_file> text block to rewrite the whole file with your changes applied.`,
             };
           }
         }
 
         // Surface errors visibly so the user can see what went wrong
         if (!toolResult.ok) {
-          appendBubble('error', `Tool "${toolName}" failed: ${toolResult.error.split('\n')[0]}`);
+          if (args.path) markLedgerFailed(taskLedger, args.path, toolResult.error);
+          addActivity({
+            kind: activityKindForTool(toolName),
+            status: 'error',
+            title: `${toolName} failed${args.path ? `: ${shortPath(args.path)}` : ''}`,
+            subtitle: args.path || args.root || args.cmd || '',
+            detail: buildToolActivityDetail(toolName, args, toolResult),
+          });
+          if (recordRepeatedFailure(failureFingerprints, toolName, JSON.stringify(args).slice(0, 500), toolResult.error) >= 3) {
+            appendBubble('error', `Repeated failure in ${toolName} — stopping to avoid a loop.`);
+            break;
+          }
         } else {
+          if (['edit_file', 'create_dir'].includes(toolName) && args.path) markLedgerWritten(taskLedger, args.path);
           // Show a brief success confirmation for write/shell tools
-          const writingTools = ['write_file', 'append_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell'];
-          if (writingTools.includes(toolName)) {
-            let summary;
-            if (toolName === 'run_shell' && toolResult.result && typeof toolResult.result === 'object') {
-              const { stdout, stderr, exitCode } = toolResult.result;
-              summary = `✓ ran: exit ${exitCode ?? 0}` + (stdout ? `\n${stdout.slice(0, 300)}` : '') + (stderr ? `\nstderr: ${stderr.slice(0, 200)}` : '');
-            } else {
-              summary = `✓ ${toolResult.result || toolName + ' completed'}`;
-            }
-            appendBubble('assistant', summary);
+          const visibleTools = ['write_file', 'append_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell', 'read_file', 'list_dir', 'grep', 'glob'];
+          if (visibleTools.includes(toolName)) {
+            addActivity({
+              kind: activityKindForTool(toolName),
+              status: 'success',
+              title: activityTitleForTool(toolName, args, toolResult),
+              subtitle: args.path || args.root || args.pattern || args.cmd || '',
+              detail: buildToolActivityDetail(toolName, args, toolResult),
+            });
           }
         }
       } else {
@@ -638,6 +765,361 @@ function showApprovalCard({ chat, toolName, args, risk, call, remembered }) {
   });
 }
 
+async function executeTextWriteBlock(block, workspace) {
+  const lines = block.content.split('\n');
+  const chunks = chunkFileContent(block.content);
+  const firstTool = block.tool === 'append_file' ? 'append_file' : 'write_file';
+  let result = await ipcRenderer.invoke('agent:run-tool', {
+    tool: firstTool,
+    args: { path: block.path, content: chunks[0] || '' },
+    workspace,
+  });
+
+  for (let i = 1; i < chunks.length && result.ok; i++) {
+    result = await ipcRenderer.invoke('agent:run-tool', {
+      tool: 'append_file',
+      args: { path: block.path, content: chunks[i].startsWith('\n') ? chunks[i] : '\n' + chunks[i] },
+      workspace,
+    });
+  }
+
+  return { ...result, lines: lines.length, chunks: chunks.length };
+}
+
+function chunkFileContent(content) {
+  const lines = content.split('\n');
+  const chunks = [];
+  let current = [];
+  let currentChars = 0;
+
+  for (const line of lines) {
+    const lineChars = line.length + 1;
+    if (current.length > 0 && (current.length >= WRITE_CHUNK_LINES || currentChars + lineChars > WRITE_CHUNK_CHARS)) {
+      chunks.push(current.join('\n'));
+      current = [];
+      currentChars = 0;
+    }
+    current.push(line);
+    currentChars += lineChars;
+  }
+
+  if (current.length > 0) chunks.push(current.join('\n'));
+  return chunks.length ? chunks : [''];
+}
+
+function extractTextWriteBlocks(text, history = []) {
+  const blocks = [];
+
+  const xmlRe = /<(write_file|append_file)\s+path=(["'])([^"']+)\2>([\s\S]*?)<\/\1>/g;
+  for (const match of text.matchAll(xmlRe)) {
+    blocks.push({
+      tool: match[1],
+      path: match[3],
+      content: match[4],
+      fullMatch: match[0],
+    });
+  }
+  if (blocks.length > 0) return blocks;
+
+  const fileBlockRe = /<<<FILE\s+path=(["'])([^"']+)\1(?:\s+mode=(["']?)(write|append)\3)?\s*\n([\s\S]*?)\n?<<<END_FILE/g;
+  for (const match of text.matchAll(fileBlockRe)) {
+    blocks.push({
+      tool: match[4] === 'append' ? 'append_file' : 'write_file',
+      path: match[2],
+      content: match[5],
+      fullMatch: match[0],
+    });
+  }
+  if (blocks.length > 0) return blocks;
+
+  // Fallback for models that ignore XML instructions and emit
+  // "path/to/file.js" followed by a markdown code block.
+  const codeBlockRe = /(?:(?:\*\*|`)?([^\s`*()\n]+)(?:\*\*|`)?\s*\n)?```[a-zA-Z]*\n([\s\S]*?)```/g;
+  for (const match of text.matchAll(codeBlockRe)) {
+    const filename = inferCodeBlockFilename(text, match, history);
+    const content = match[2];
+    if (!filename || !looksLikeSourcePath(filename) || !content || content.trim().length < 10) continue;
+    blocks.push({
+      tool: 'write_file',
+      path: filename,
+      content,
+      fullMatch: match[0],
+    });
+  }
+
+  return blocks;
+}
+
+function stripTextWriteBlocks(text) {
+  let stripped = text.replace(/<(write_file|append_file)\s+path=(["'])([^"']+)\2>[\s\S]*?<\/\1>/g, '');
+  stripped = stripped.replace(/<<<FILE\s+path=(["'])([^"']+)\1(?:\s+mode=(["']?)(write|append)\3)?\s*\n[\s\S]*?\n?<<<END_FILE/g, '');
+  const blocks = extractTextWriteBlocks(stripped);
+  for (const block of blocks) {
+    stripped = stripped.replace(block.fullMatch, '');
+  }
+  return stripped;
+}
+
+function findIncompleteTextWriteBlock(text) {
+  const openRe = /<(write_file|append_file)\s+path=(["'])([^"']+)\2>/g;
+  let match;
+  let last = null;
+  while ((match = openRe.exec(text)) !== null) {
+    last = {
+      tool: match[1],
+      path: match[3],
+      index: match.index,
+      openTag: match[0],
+    };
+  }
+  if (last) {
+    const afterOpen = text.slice(last.index + last.openTag.length);
+    const closeTag = `</${last.tool}>`;
+    if (!afterOpen.includes(closeTag)) return last;
+  }
+
+  const fileStartRe = /<<<FILE\s+path=(["'])([^"']+)\1(?:\s+mode=(["']?)(write|append)\3)?\s*\n/g;
+  let fileMatch;
+  let lastFile = null;
+  while ((fileMatch = fileStartRe.exec(text)) !== null) {
+    lastFile = {
+      tool: fileMatch[4] === 'append' ? 'append_file' : 'write_file',
+      path: fileMatch[2],
+      index: fileMatch.index,
+      openTag: fileMatch[0],
+    };
+  }
+  if (!lastFile) return null;
+  return text.slice(lastFile.index + lastFile.openTag.length).includes('<<<END_FILE') ? null : lastFile;
+}
+
+function stripLargeIncompleteWrite(text) {
+  const incomplete = findIncompleteTextWriteBlock(text);
+  if (!incomplete) return text;
+  const prefix = text.slice(0, incomplete.index).trim();
+  const note = `[Incomplete ${incomplete.tool} block for ${incomplete.path || 'unknown file'} omitted from prompt history]`;
+  return prefix ? `${prefix}\n\n${note}` : note;
+}
+
+function inferCodeBlockFilename(text, match, history = []) {
+  let filename = match[1] || null;
+  if (filename && looksLikeSourcePath(filename)) return filename;
+
+  const before = text.slice(0, match.index);
+  const nearby = before.match(/([^\s`*()\n]+\.(?:html?|css|js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|json|yaml|yml|md|txt|sh|env|toml|xml|svg))\b/gi);
+  if (nearby) return nearby[nearby.length - 1];
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    const wrote = msg.content && msg.content.match(/Wrote\s+(.+?)\s+\(\d+\s+lines\)/);
+    if (wrote && looksLikeSourcePath(wrote[1])) return wrote[1];
+  }
+  return null;
+}
+
+function looksLikeSourcePath(pathLike) {
+  return /\.(html?|css|js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|json|yaml|yml|md|txt|sh|env|toml|xml|svg)$/i.test(pathLike);
+}
+
+function createTaskLedger(messages, approvedPlan, workspace) {
+  const source = [approvedPlan, messages.map(m => m.content || '').join('\n')].filter(Boolean).join('\n');
+  const plannedFiles = new Set();
+  const pathRe = /(?:^|[\s"'`(])((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))/gi;
+  for (const match of source.matchAll(pathRe)) {
+    let p = match[1].replace(/[.,;:]+$/, '');
+    if (workspace && !p.startsWith('/') && !/^[A-Za-z]:\\/.test(p)) p = `${workspace}/${p.replace(/^\.?\//, '')}`;
+    plannedFiles.add(p);
+  }
+  return {
+    plannedFiles,
+    writtenFiles: new Set(),
+    failedFiles: new Map(),
+  };
+}
+
+function markLedgerWritten(ledger, path) {
+  if (!path) return;
+  ledger.writtenFiles.add(path);
+  ledger.failedFiles.delete(path);
+}
+
+function markLedgerFailed(ledger, path, error) {
+  if (!path) return;
+  ledger.failedFiles.set(path, error || 'unknown error');
+}
+
+function getPendingFiles(ledger) {
+  return [...ledger.plannedFiles].filter(p => !ledger.writtenFiles.has(p));
+}
+
+function formatLedgerForPrompt(ledger) {
+  const planned = [...ledger.plannedFiles];
+  const pending = getPendingFiles(ledger);
+  const failed = [...ledger.failedFiles.entries()];
+  if (planned.length === 0 && failed.length === 0) return '';
+  return `\nTASK LEDGER:\n- Planned files: ${planned.length ? planned.join(', ') : '(none detected)'}\n- Written files: ${[...ledger.writtenFiles].join(', ') || '(none yet)'}\n- Pending files: ${pending.join(', ') || '(none)'}\n- Failed files: ${failed.map(([p, e]) => `${p} (${e})`).join(', ') || '(none)'}\n`;
+}
+
+function injectLedgerStatus(messages, ledger) {
+  const note = formatLedgerForPrompt(ledger);
+  if (!note) return messages;
+  return [
+    ...messages,
+    {
+      role: 'user',
+      content: `${note}\nUse this ledger as state. Resolve failed and pending files before saying Done.`,
+    },
+  ];
+}
+
+function isPrematureDone(resp, ledger) {
+  if (!resp || !/\bdone\b|completed|finished|all set/i.test(resp)) return false;
+  return getPendingFiles(ledger).length > 0 || ledger.failedFiles.size > 0;
+}
+
+function recordRepeatedFailure(failures, tool, target, error) {
+  const key = `${tool}:${target}:${String(error || '').slice(0, 200)}`;
+  const count = (failures.get(key) || 0) + 1;
+  failures.set(key, count);
+  return count;
+}
+
+function shortPath(path) {
+  if (!path) return '';
+  const parts = String(path).split(/[\\/]/);
+  return parts.slice(-2).join('/');
+}
+
+function previewText(text, maxLines = 80, maxChars = 6000) {
+  const s = String(text || '');
+  const lines = s.split('\n');
+  const clipped = lines.slice(0, maxLines).join('\n').slice(0, maxChars);
+  const more = lines.length > maxLines || s.length > maxChars;
+  return more ? `${clipped}\n...[truncated preview]` : clipped;
+}
+
+function activityKindForTool(toolName) {
+  if (toolName === 'edit_file') return 'edit';
+  if (['write_file', 'append_file', 'create_dir', 'delete_file'].includes(toolName)) return 'write';
+  if (['read_file', 'list_dir', 'grep', 'glob'].includes(toolName)) return 'read';
+  if (toolName === 'run_shell') return 'shell';
+  return 'info';
+}
+
+function activityTitleForTool(toolName, args, toolResult) {
+  if (toolName === 'edit_file') return `Edited ${shortPath(args.path)}`;
+  if (toolName === 'create_dir') return `Created ${shortPath(args.path)}`;
+  if (toolName === 'delete_file') return `Deleted ${shortPath(args.path)}`;
+  if (toolName === 'read_file') return `Read ${shortPath(args.path)}`;
+  if (toolName === 'list_dir') return `Listed ${shortPath(args.path || args.root || '.')}`;
+  if (toolName === 'grep') return `Searched "${args.pattern}"`;
+  if (toolName === 'glob') return `Matched "${args.pattern}"`;
+  if (toolName === 'run_shell') {
+    const exitCode = toolResult.result && typeof toolResult.result === 'object' ? toolResult.result.exitCode : 0;
+    return `Ran ${args.cmd} (exit ${exitCode ?? 0})`;
+  }
+  return `${toolName} completed`;
+}
+
+function buildToolActivityDetail(toolName, args, toolResult) {
+  const detail = {
+    tool: toolName,
+    path: args.path || args.root || args.cwd || '',
+    status: toolResult.ok ? 'ok' : 'failed',
+    error: toolResult.ok ? '' : toolResult.error,
+  };
+  if (toolName === 'edit_file') {
+    const oldLines = String(args.old_string || '').split('\n').map(l => `- ${l}`).join('\n');
+    const newLines = String(args.new_string || '').split('\n').map(l => `+ ${l}`).join('\n');
+    detail.diff = `${oldLines}\n${newLines}`;
+  }
+  if (toolName === 'run_shell') {
+    detail.command = [args.cmd, ...(args.args || [])].join(' ');
+    if (toolResult.result && typeof toolResult.result === 'object') {
+      detail.stdout = toolResult.result.stdout || '';
+      detail.stderr = toolResult.result.stderr || '';
+      detail.result = { exitCode: toolResult.result.exitCode ?? 0 };
+    }
+  } else if (toolName === 'read_file') {
+    detail.preview = previewText(toolResult.result || '');
+  } else if (toolResult.result) {
+    detail.result = toolResult.result;
+  }
+  return detail;
+}
+
+async function verifyLedgerFiles(ledger, workspace) {
+  const paths = [...ledger.writtenFiles, ...ledger.plannedFiles];
+  if (paths.length === 0) return { ok: true, failed: [] };
+  const uniquePaths = [...new Set(paths)];
+  const r = await ipcRenderer.invoke('agent:verify-files', { paths: uniquePaths, workspace });
+  if (!r.ok) return { ok: false, failed: uniquePaths.map(path => ({ path, error: r.error || 'verification failed' })) };
+  const failed = (r.results || []).filter(item => !item.ok);
+  return { ok: failed.length === 0, failed };
+}
+
+function shouldContinueAfterPlainResponse(text, toolCallCount, continuationCount) {
+  if (toolCallCount === 0 || continuationCount >= 3) return false;
+
+  const normalized = text.toLowerCase().trim();
+  if (!normalized || /\bdone\b|completed|finished|all files|task is complete/.test(normalized)) return false;
+
+  const progressOnlyPatterns = [
+    /\bnow let me\b/,
+    /\blet me (create|add|build|write|update|implement)\b/,
+    /\bi'?ll (create|add|build|write|update|implement|continue)\b/,
+    /\bstarting (with|on)\b/,
+    /\bnext,?\s+(i|let me|we)\b/,
+    /\bcontinue (with|by|to)\b/,
+    /\bremaining files?\b/,
+    /\bcreate all the files\b/,
+    /:\s*$/,
+  ];
+
+  return progressOnlyPatterns.some(pattern => pattern.test(normalized));
+}
+
+function isTruncatedFinish(reason) {
+  return ['length', 'max_tokens', 'content_filter', 'context_length', 'truncated'].includes(String(reason).toLowerCase());
+}
+
+function sanitizeHistoryForTools(messages, activeTools = []) {
+  const activeToolNames = new Set(activeTools.map(t => t.function?.name || t.name).filter(Boolean));
+  const allowToolCalls = activeToolNames.size > 0;
+  const keptToolCallIds = new Set();
+
+  return messages.map(m => {
+    if (m.role === 'assistant' && m.tool_calls) {
+      const keptCalls = allowToolCalls
+        ? m.tool_calls.filter(tc => activeToolNames.has(tc.function?.name || tc.name))
+        : [];
+
+      if (keptCalls.length === 0) {
+        const content = (m.content || '').trim();
+        return content
+          ? { role: 'assistant', content }
+          : { role: 'assistant', content: '[Previous tool call omitted from prompt history]' };
+      }
+
+      for (const tc of keptCalls) {
+        if (tc.id) keptToolCallIds.add(tc.id);
+      }
+      return { ...m, tool_calls: keptCalls };
+    }
+
+    // llama.cpp can stay in tool-call parsing mode if old tool result roles
+    // appear without matching active tools. Keep the useful fact, not the role.
+    if (m.role === 'tool' && (!allowToolCalls || !keptToolCallIds.has(m.tool_call_id))) {
+      return {
+        role: 'user',
+        content: `<previous_tool_result>\n${m.content || ''}\n</previous_tool_result>`,
+      };
+    }
+
+    return m;
+  });
+}
+
 /**
  * Some models dump tool call JSON as plain text or show file contents as markdown code blocks.
  * This parser extracts both and converts them into tool_calls format.
@@ -651,7 +1133,7 @@ function extractToolCallsFromText(text, history = []) {
   for (const m of tagMatches) {
     try {
       const obj = JSON.parse(m[1].trim());
-      if (obj.name && (obj.arguments || obj.parameters)) {
+      if (obj.name && (obj.arguments || obj.parameters) && !TEXT_WRITE_TOOLS.has(obj.name)) {
         calls.push({
           id: `fallback_${idCounter++}`,
           type: 'function',
@@ -665,7 +1147,7 @@ function extractToolCallsFromText(text, history = []) {
   // Pattern 2: JSON objects with "name" + "arguments"/"parameters"
   const objects = extractJsonObjects(text);
   for (const obj of objects) {
-    if (obj.name && (obj.arguments || obj.parameters)) {
+    if (obj.name && (obj.arguments || obj.parameters) && !TEXT_WRITE_TOOLS.has(obj.name)) {
       calls.push({
         id: `fallback_${idCounter++}`,
         type: 'function',
@@ -674,47 +1156,6 @@ function extractToolCallsFromText(text, history = []) {
     }
   }
   if (calls.length > 0) return calls;
-
-  // Pattern 3: markdown code blocks — with or without a filename before them
-  const SOURCE_EXTS = /\.(html?|css|js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|json|yaml|yml|md|txt|sh|env|toml|xml|svg)$/i;
-  const codeBlockRe = /(?:(?:\*\*|`)?([^\s`*()\n]+)(?:\*\*|`)?\s*\n)?```[a-zA-Z]*\n([\s\S]*?)```/g;
-
-  // Find last file path used in history (for inferring filename when missing)
-  let lastFilePath = null;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const msg = history[i];
-    if (msg.role === 'tool' && msg.content) {
-      const m = msg.content.match(/"path"\s*:\s*"([^"]+)"/);
-      if (m) { lastFilePath = m[1]; break; }
-    }
-  }
-
-  let match;
-  while ((match = codeBlockRe.exec(text)) !== null) {
-    let filename = match[1] || null;
-    const content = match[2];
-    if (!content || content.trim().length < 10) continue;
-
-    // If no filename captured, try to infer from context
-    if (!filename || !SOURCE_EXTS.test(filename)) {
-      // Look for a filename mentioned anywhere before this code block in the text
-      const before = text.slice(0, match.index);
-      const nearby = before.match(/([^\s`*()\n]+\.(html?|css|js|ts|py|rb|go|java|c|cpp|json|yaml|yml|sh|txt))\b/gi);
-      if (nearby) {
-        filename = nearby[nearby.length - 1]; // use most recent mention
-      } else if (lastFilePath) {
-        filename = lastFilePath; // fall back to last written file
-      }
-    }
-
-    if (filename && SOURCE_EXTS.test(filename)) {
-      calls.push({
-        id: `fallback_${idCounter++}`,
-        type: 'function',
-        function: { name: 'write_file', arguments: { path: filename, content } },
-      });
-    }
-  }
 
   return calls;
 }

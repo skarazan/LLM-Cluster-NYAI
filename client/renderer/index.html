@@ -53,7 +53,19 @@
     <button id="update-dismiss">✕</button>
   </div>
 
-  <main id="chat" class="chat"></main>
+  <div class="workspace-main">
+    <main id="chat" class="chat"></main>
+    <aside id="activity-panel" class="activity-panel hidden">
+      <div class="activity-panel-header">
+        <div>
+          <div id="activity-title" class="activity-title">Activity</div>
+          <div id="activity-subtitle" class="activity-subtitle">Select an activity to inspect details.</div>
+        </div>
+        <button id="activity-close" class="activity-close" title="Close details">×</button>
+      </div>
+      <pre id="activity-detail" class="activity-detail"></pre>
+    </aside>
+  </div>
 
   <footer>
     <textarea id="input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="2"></textarea>

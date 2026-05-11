@@ -14,19 +14,19 @@ const {
 
 // GET /workers — lists all registered workers (strip non-serializable internals)
 router.get('/', (req, res) => {
-  const workers = getAllWorkers().map(({ id, name, ip, models, status, capacity, metrics, inflight, version, lastSeen }) => ({
-    id, name, ip, models, status, capacity, metrics, inflight, version, lastSeen,
+  const workers = getAllWorkers().map(({ id, stableId, name, ip, port, models, status, capacity, metrics, inflight, version, lastSeen }) => ({
+    id, stableId, name, ip, port, models, status, capacity, metrics, inflight, version, lastSeen,
   }));
   res.json({ workers });
 });
 
 // POST /workers/register — worker self-registers on startup
 router.post('/register', (req, res) => {
-  const { name, ip, port, models, capacity, version } = req.body;
+  const { name, ip, port, models, capacity, version, stableId } = req.body;
   if (!name || !ip) {
     return res.status(400).json({ error: 'Missing required fields: name, ip' });
   }
-  const id = registerWorker({ name, ip, port, models, capacity, version });
+  const id = registerWorker({ name, ip, port, models, capacity, version, stableId });
   res.status(201).json({ id });
 });
 

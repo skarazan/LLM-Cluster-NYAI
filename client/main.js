@@ -10,6 +10,7 @@ let mainWindow;
 
 const RELEASES_URL = 'https://github.com/skarazan/LLM-Cluster-NYAI/releases/latest';
 const RELEASES_API = 'https://api.github.com/repos/skarazan/LLM-Cluster-NYAI/releases/latest';
+const MAX_NATIVE_WRITE_CHARS = 7000;
 
 // --- Update check: compare current version against latest GitHub release ---
 async function checkForUpdates() {
@@ -185,6 +186,9 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
 
       case 'write_file': {
         if (args.content == null) return { ok: false, error: 'write_file requires "content" argument (received undefined)' };
+        if (String(args.content).length > MAX_NATIVE_WRITE_CHARS) {
+          return { ok: false, error: `write_file content is too large for a native tool call (${String(args.content).length} chars). Use <write_file> text blocks so the client can chunk it safely.` };
+        }
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
         await fs.mkdir(path.dirname(check.resolved), { recursive: true });
@@ -194,6 +198,9 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
 
       case 'append_file': {
         if (args.content == null) return { ok: false, error: 'append_file requires "content" argument' };
+        if (String(args.content).length > MAX_NATIVE_WRITE_CHARS) {
+          return { ok: false, error: `append_file content is too large for a native tool call (${String(args.content).length} chars). Use <append_file> text blocks so the client can chunk it safely.` };
+        }
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
         await fs.appendFile(check.resolved, args.content, 'utf8');
@@ -254,6 +261,40 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
     console.error(`[tool] ${tool} threw: ${err.message}`);
     return { ok: false, error: err.message };
   }
+});
+
+ipcMain.handle('agent:verify-files', async (event, { paths, workspace }) => {
+  const results = [];
+  for (const p of paths || []) {
+    const check = resolveSafe(workspace, p);
+    if (!check.ok) {
+      results.push({ path: p, ok: false, error: check.error });
+      continue;
+    }
+    try {
+      const stat = await fs.stat(check.resolved);
+      if (!stat.isFile()) {
+        results.push({ path: p, ok: false, bytes: stat.size, error: 'not a file' });
+        continue;
+      }
+      if (stat.size === 0) {
+        results.push({ path: p, ok: false, bytes: stat.size, error: 'file is empty' });
+        continue;
+      }
+      if (/\.json$/i.test(p)) {
+        try {
+          JSON.parse(await fs.readFile(check.resolved, 'utf8'));
+        } catch (err) {
+          results.push({ path: p, ok: false, bytes: stat.size, error: `invalid JSON: ${err.message}` });
+          continue;
+        }
+      }
+      results.push({ path: p, ok: true, bytes: stat.size, error: null });
+    } catch (err) {
+      results.push({ path: p, ok: false, error: err.message });
+    }
+  }
+  return { ok: true, results };
 });
 
 // ── Helper: simple recursive grep ───────────────────────────────────────────

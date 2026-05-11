@@ -58,6 +58,7 @@ router.post('/', async (req, res) => {
       model,
       response: result.content,
       tokens: result.tokens,
+      finish_reason: result.finish_reason || null,
       ms: Date.now() - t0,
       attempt,
     };

@@ -47,12 +47,20 @@ function resolveSafe(workspaceRoot, p) {
 
   // Expand ~ shorthand
   if (p.startsWith('~/')) p = path.join(os.homedir(), p.slice(2));
+  if (typeof p === 'string' && /[\0\r\n]/.test(p)) {
+    return { ok: false, error: `Path "${p}" contains invalid characters.` };
+  }
+
+  // Common model slip: "/workspacefile.js" instead of "/workspace/file.js".
+  if (typeof p === 'string' && path.isAbsolute(p) && p.startsWith(workspaceRoot) && !p.startsWith(workspaceRoot + path.sep) && p !== workspaceRoot) {
+    p = path.join(workspaceRoot, p.slice(workspaceRoot.length));
+  }
 
   const resolved = path.resolve(workspaceRoot, p);
 
   // Must be inside workspace
   if (!resolved.startsWith(workspaceRoot + path.sep) && resolved !== workspaceRoot) {
-    return { ok: false, error: `Path "${p}" is outside the workspace root.` };
+    return { ok: false, error: `Path "${p}" is outside the workspace root "${workspaceRoot}". Use an absolute path inside the selected workspace.` };
   }
 
   // Check absolute deny-list

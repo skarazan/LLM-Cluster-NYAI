@@ -64,11 +64,24 @@ ensureOllamaAndLlama3().catch(err => console.error('[setup] error:', err));
 
 const DEFAULT_CAPACITY = { cores: 4, maxThreads: 2, maxConcurrent: 1 };
 
-function registerWorker({ name, ip, port = 11434, models = [], capacity, version }) {
+function registerWorker({ name, ip, port = 11434, models = [], capacity, version, stableId }) {
+  const identity = stableId || `${name}@${ip}:${port}`;
+  for (const [existingId, existing] of workers) {
+    const existingIdentity = existing.stableId || `${existing.name}@${existing.ip}:${existing.port || port}`;
+    if (existingIdentity === identity) {
+      console.log(`[registry] replacing existing worker registration: ${name} oldId=${existingId}`);
+      deregisterWorker(existingId);
+      break;
+    }
+  }
+
   const id = randomUUID();
   const worker = {
     id,
+    stableId: identity,
     name,
+    ip,
+    port,
     models,
     lastSeen: Date.now(),
     status: 'online',
@@ -80,7 +93,7 @@ function registerWorker({ name, ip, port = 11434, models = [], capacity, version
     waiters: [],
   };
   workers.set(id, worker);
-  console.log(`[registry] registered: ${name} id=${id} threads=${worker.capacity.maxThreads}`);
+  console.log(`[registry] registered: ${name} id=${id} stableId=${identity} threads=${worker.capacity.maxThreads}`);
   return id;
 }
 

@@ -114,12 +114,13 @@ function getLocalIp() {
 // ---------- Manager communication ----------
 
 async function register(managerUrl, name, ip, port, models, capacity) {
+  const stableId = `${name}@${ip}:${port}`;
   let res;
   try {
     res = await fetch(`${managerUrl}/workers/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, ip, port, models, capacity, version: '3.0' }),
+      body: JSON.stringify({ name, ip, port, models, capacity, version: '3.0', stableId }),
     });
   } catch (err) {
     console.error(`Cannot reach manager at ${managerUrl}.`);
@@ -279,7 +280,7 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
         : '';
 
       return {
-        content: `ERROR: Tool call JSON was truncated.${hint}${htmlFix}\nYou MUST:\n1. Use SINGLE QUOTES for all HTML attributes (not double quotes)\n2. Split files into 50-line chunks: write_file first 50 lines, then append_file\n3. Keep each call under 1500 characters.\nContinue now.`,
+        content: `ERROR: Native tool-call JSON was truncated.${hint}${htmlFix}\nYou MUST stop using JSON tool calls for file contents. Continue by outputting plain text blocks only:\n<write_file path="/absolute/path/to/file">full file content here</write_file>\nor\n<append_file path="/absolute/path/to/file">more content here</append_file>\nDo not call write_file or append_file as tools.`,
         tool_calls: null,
         tokens: { prompt: 0, response: 0, total: 0, tokensPerSec: null },
       };
@@ -288,14 +289,13 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     throw new Error(`${engine.type} HTTP ${res.status}: ${errBody.slice(0, 500)}`);
   }
 
-  let content, toolCalls, tokens;
+  let content, toolCalls, tokens, finishReason = null;
 
   if (engine.openai) {
     // --- SSE stream reader ---
     let accumulated = '';
     const toolCallsMap = {};
     let promptTokens = 0, completionTokens = 0;
-    let finishReason = null;
     let sseEventCount = 0;
     let sseErrors = [];
 
@@ -387,6 +387,7 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     const data = await res.json();
     toolCalls = data.message?.tool_calls || null;
     content   = data.message?.content    || '';
+    finishReason = data.done_reason || (data.done ? 'stop' : null);
     tokens = {
       prompt:       data.prompt_eval_count || 0,
       response:     data.eval_count        || 0,
@@ -405,8 +406,37 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   }
 
   const result = { content, tokens };
+  if (finishReason) result.finish_reason = finishReason;
   if (toolCalls) result.tool_calls = toolCalls;
   return result;
+}
+
+async function submitResultWithRetry(managerUrl, jobId, result, error) {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      const res = await fetch(`${managerUrl}/workers/result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId, result, error }),
+      });
+
+      if (res.ok) return true;
+      if (res.status === 404) {
+        console.warn(`[job] manager no longer has jobId=${jobId}; result will be dropped`);
+        return false;
+      }
+
+      const body = await res.text().catch(() => '');
+      console.warn(`[job] result submit attempt=${attempt} failed HTTP ${res.status}: ${body.slice(0, 200)}`);
+    } catch (err) {
+      console.warn(`[job] result submit attempt=${attempt} failed: ${err.message}`);
+    }
+
+    const delay = Math.min(30_000, 1000 * Math.pow(2, Math.min(attempt - 1, 5)));
+    await new Promise(r => setTimeout(r, delay));
+  }
 }
 
 // ---------- Poll loop ----------
@@ -469,16 +499,7 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
       console.error(`[job] failed jobId=${job.id}: ${err.message}`);
     }
 
-    // Post result back
-    try {
-      await fetch(`${managerUrl}/workers/result`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: job.id, result, error }),
-      });
-    } catch (err) {
-      console.error(`[job] failed to submit result: ${err.message}`);
-    }
+    await submitResultWithRetry(managerUrl, job.id, result, error);
   }
 }
 

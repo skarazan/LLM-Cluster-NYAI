@@ -27,6 +27,11 @@ const sessionTokensEl = document.getElementById('session-tokens');
 const chat            = document.getElementById('chat');
 const input           = document.getElementById('input');
 const sendBtn         = document.getElementById('send-btn');
+const activityPanel   = document.getElementById('activity-panel');
+const activityTitle   = document.getElementById('activity-title');
+const activitySubtitle = document.getElementById('activity-subtitle');
+const activityDetail  = document.getElementById('activity-detail');
+const activityClose   = document.getElementById('activity-close');
 
 // Code mode controls
 const modeChatBtn    = document.getElementById('mode-chat');
@@ -171,6 +176,68 @@ function appendThinkingBlock(text) {
   chat.scrollTop = chat.scrollHeight;
 }
 
+function appendActivity({ kind = 'info', title, subtitle = '', detail = '', status = 'info' }) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = `activity-row ${kind} ${status}`;
+
+  const icon = document.createElement('span');
+  icon.className = 'activity-icon';
+  icon.textContent = activityIcon(kind, status);
+  row.appendChild(icon);
+
+  const label = document.createElement('span');
+  label.textContent = title || 'Activity';
+  row.appendChild(label);
+
+  const detailText = typeof detail === 'string' ? detail : formatActivityDetail(detail);
+  row.addEventListener('click', () => {
+    chat.querySelectorAll('.activity-row.active').forEach(el => el.classList.remove('active'));
+    row.classList.add('active');
+    activityTitle.textContent = title || 'Activity';
+    activitySubtitle.textContent = subtitle || '';
+    activityDetail.textContent = detailText || '(no details)';
+    activityPanel.classList.remove('hidden');
+  });
+
+  chat.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+  return row;
+}
+
+function activityIcon(kind, status) {
+  if (status === 'error') return '!';
+  if (kind === 'write') return '+';
+  if (kind === 'edit') return '✎';
+  if (kind === 'read') return '⌕';
+  if (kind === 'shell') return '>';
+  if (kind === 'dir') return '□';
+  return '•';
+}
+
+function formatActivityDetail(detail) {
+  if (!detail || typeof detail !== 'object') return String(detail || '');
+  const lines = [];
+  if (detail.path) lines.push(`Path: ${detail.path}`);
+  if (detail.tool) lines.push(`Tool: ${detail.tool}`);
+  if (detail.status) lines.push(`Status: ${detail.status}`);
+  if (detail.error) lines.push(`Error: ${detail.error}`);
+  if (detail.command) lines.push(`Command: ${detail.command}`);
+  if (detail.lines != null) lines.push(`Lines: ${detail.lines}`);
+  if (detail.chunks != null) lines.push(`Chunks: ${detail.chunks}`);
+  if (detail.preview) lines.push(`\nPreview:\n${detail.preview}`);
+  if (detail.diff) lines.push(`\nDiff:\n${detail.diff}`);
+  if (detail.result) lines.push(`\nResult:\n${typeof detail.result === 'string' ? detail.result : JSON.stringify(detail.result, null, 2)}`);
+  if (detail.stdout) lines.push(`\nstdout:\n${detail.stdout}`);
+  if (detail.stderr) lines.push(`\nstderr:\n${detail.stderr}`);
+  return lines.join('\n');
+}
+
+activityClose.addEventListener('click', () => {
+  activityPanel.classList.add('hidden');
+  chat.querySelectorAll('.activity-row.active').forEach(el => el.classList.remove('active'));
+});
+
 // --- mDNS Discovery ---
 
 async function discover() {
@@ -298,6 +365,7 @@ async function sendCode(prompt) {
       planMode: planModeCheck.checked,
       chat,
       appendBubble: (...args) => { ensurePlaceholderRemoved(); return appendBubble(...args); },
+      appendActivity: (activity) => { ensurePlaceholderRemoved(); return appendActivity(activity); },
       setLoading: (on) => {
         if (on && !placeholderRemoved) {
           // placeholder already showing
@@ -344,6 +412,8 @@ function newChat() {
   abortRef      = { aborted: true }; // cancel any in-flight loop
   updateSessionTokensDisplay();
   chat.innerHTML = '';
+  activityPanel.classList.add('hidden');
+  activityDetail.textContent = '';
   stopBtn.classList.add('hidden');
   input.focus();
 }
