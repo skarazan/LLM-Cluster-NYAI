@@ -104,11 +104,11 @@ WORKFLOW RULES:
 
   // Trim history to fit context window.
   // Budget: leave room for tool schemas (~3K tok) + system prompt (~500 tok) + model output (~4K tok).
-  const MAX_CTX_TOKENS = 8000;
+  const MAX_CTX_TOKENS = 20000;
   function trimHistory(msgs) {
-    // Step 1: truncate ALL old tool results aggressively, keep only last 2 full
-    const MAX_TOOL_RESULT_CHARS = 300;
-    const KEEP_RECENT = 2;
+    // Step 1: truncate old tool results, keep last 6 full for active work context
+    const MAX_TOOL_RESULT_CHARS = 400;
+    const KEEP_RECENT = 6;
     let toolResultsSeen = 0;
     const total = msgs.filter(m => m.role === 'tool').length;
     let trimmed = msgs.map(m => {

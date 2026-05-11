@@ -365,10 +365,10 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   }
 
   if (!toolCalls && !content) {
-    const hint = engine.openai
-      ? 'Empty SSE stream — llama-server may have crashed on this message shape. Check server logs. Common cause: role:tool messages with --jinja enabled.'
-      : 'Empty response body from engine.';
-    throw new Error(`Unexpected ${engine.type} response shape. ${hint}`);
+    // Model may have generated only thinking tokens (<think>...</think>) with no visible output.
+    // Return empty content instead of crashing — agent loop will handle it.
+    console.warn(`[job] empty response (no content, no tool_calls). completionTokens=${tokens.response}. Likely thinking-only output.`);
+    content = '';
   }
 
   const result = { content, tokens };
