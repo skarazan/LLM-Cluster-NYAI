@@ -216,12 +216,15 @@ ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : 
       chat.appendChild(activeStreamEl);
     }
     const body = activeStreamEl.querySelector('.bubble-body');
-    // Show thinking inline with 💭 marker instead of raw tags
     const raw = (body.dataset.raw || '') + text;
     body.dataset.raw = raw;
-    body.textContent = raw
+    // Hide file content inside <write_file>/<append_file> tags and thinking blocks
+    let display = raw
       .replace(/<(think|thinking|reasoning)>\s*/g, '💭 ')
-      .replace(/\s*<\/(think|thinking|reasoning)>/g, '\n─────\n');
+      .replace(/\s*<\/(think|thinking|reasoning)>/g, '\n─────\n')
+      .replace(/<(write_file|append_file)\s+path="([^"]*)">[^]*?<\/\1>/g, '📝 Writing $2…\n')
+      .replace(/<(write_file|append_file)\s+path="([^"]*)">[^]*$/g, '📝 Writing $2…');
+    body.textContent = display;
     chat.scrollTop = chat.scrollHeight;
   };
   ipcRenderer.on('stream-chunk', onStreamChunk);
