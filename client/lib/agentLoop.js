@@ -4,7 +4,7 @@ const { ipcRenderer }   = require('electron');
 const { buildApprovalCard } = require('../renderer/components/approvalCard');
 const { getTool }       = require('./tools');
 
-const MAX_TOOL_CALLS = 25;
+const MAX_TOOL_CALLS = Infinity;
 
 // Tools that can never be auto-approved or remembered
 const ALWAYS_CONFIRM = new Set(['delete_file', 'run_shell']);
@@ -212,7 +212,11 @@ WORKFLOW RULES:
       let rawArgs = call.function?.arguments ?? call.arguments ?? {};
       let args;
       if (typeof rawArgs === 'string') {
-        try { args = JSON.parse(rawArgs); } catch { args = {}; }
+        try { args = JSON.parse(rawArgs); } catch {
+          appendBubble('error', `Tool "${toolName}": malformed arguments (JSON parse failed). Skipping.`);
+          history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: 'Malformed tool call arguments — JSON parse failed. The arguments string was truncated or invalid. Try again with shorter content, or use edit_file instead of write_file.' }) });
+          continue;
+        }
       } else {
         args = rawArgs;
       }

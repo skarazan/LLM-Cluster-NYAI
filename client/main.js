@@ -184,6 +184,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
       }
 
       case 'write_file': {
+        if (args.content == null) return { ok: false, error: 'write_file requires "content" argument (received undefined)' };
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
         await fs.mkdir(path.dirname(check.resolved), { recursive: true });
