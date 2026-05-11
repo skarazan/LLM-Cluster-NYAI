@@ -186,20 +186,25 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   let url, body;
   if (engine.openai) {
     url = `${engine.url}/v1/chat/completions`;
+    const hasTools = job.tools && job.tools.length > 0;
     body = {
       model: job.model,
       messages,
       stream: true,
-      stream_options: { include_usage: true },  // get token counts in stream
-      max_tokens: 16384,
+      stream_options: { include_usage: true },
+      max_tokens: -1,
       temperature: 0.8,
       presence_penalty: 1.2,
       frequency_penalty: 0.4,
       cache_prompt: true,
     };
-    if (job.tools && job.tools.length > 0) {
+    if (hasTools) {
       body.tools = job.tools;
       body.tool_choice = 'auto';
+      // Disable thinking when tools are active — saves all output tokens for
+      // tool call arguments instead of wasting them on <think> blocks.
+      // Qwen3 respects this via chat_template_kwargs.
+      body.chat_template_kwargs = { enable_thinking: false };
     }
   } else {
     url = `${engine.url}/api/chat`;
