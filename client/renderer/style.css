@@ -229,6 +229,17 @@ footer button:disabled { opacity: 0.4; cursor: not-allowed; }
 .stop-btn:hover { background: #ff9ea8; }
 .stop-btn.hidden { display: none; }
 
+.plan-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: #7aa2f7;
+  cursor: pointer;
+  user-select: none;
+}
+.plan-toggle input { cursor: pointer; }
+
 /* ── Approval cards ───────────────────────────────────────────────────────── */
 .bubble.approval {
   background: #1e2030;

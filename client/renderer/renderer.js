@@ -35,6 +35,7 @@ const codeControls   = document.getElementById('code-controls');
 const workspaceBtn   = document.getElementById('workspace-btn');
 const workspaceLabel = document.getElementById('workspace-label');
 const approvalSel    = document.getElementById('approval-mode');
+const planModeCheck  = document.getElementById('plan-mode');
 const stopBtn        = document.getElementById('stop-btn');
 
 const STORAGE_KEY      = 'llm-cluster-backend-url';
@@ -294,6 +295,7 @@ async function sendCode(prompt) {
       tools: getToolSchemas(workspace),
       workspace,
       approvalMode,
+      planMode: planModeCheck.checked,
       chat,
       appendBubble: (...args) => { ensurePlaceholderRemoved(); return appendBubble(...args); },
       setLoading: (on) => {

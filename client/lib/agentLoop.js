@@ -128,28 +128,31 @@ function showPlanApproval(chat, planText) {
 async function runAgentTurn(opts) {
   const {
     backendUrl, messages, model, tools,
-    workspace, approvalMode,
+    workspace, approvalMode, planMode,
     chat, appendBubble, setLoading,
     abortRef, remembered,
   } = opts;
 
-  // ── Plan Phase ──────────────────────────────────────────────────────
-  appendBubble('assistant', 'Creating plan…');
-  const planText = await requestPlan(opts);
+  // ── Plan Phase (only when toggled on) ───────────────────────────────
+  let approvedPlan = null;
+  if (planMode) {
+    appendBubble('assistant', 'Creating plan…');
+    const planText = await requestPlan(opts);
 
-  if (!planText || abortRef.aborted) {
-    appendBubble('error', 'Failed to generate plan.');
-    return messages;
+    if (!planText || abortRef.aborted) {
+      appendBubble('error', 'Failed to generate plan.');
+      return messages;
+    }
+
+    const decision = await showPlanApproval(chat, planText);
+    if (decision === 'reject') {
+      appendBubble('error', 'Plan rejected.');
+      return messages;
+    }
+
+    approvedPlan = decision.startsWith('edit:') ? decision.slice(5) : planText;
+    appendBubble('assistant', '✓ Plan approved. Executing…');
   }
-
-  const decision = await showPlanApproval(chat, planText);
-  if (decision === 'reject') {
-    appendBubble('error', 'Plan rejected.');
-    return messages;
-  }
-
-  const approvedPlan = decision.startsWith('edit:') ? decision.slice(5) : planText;
-  appendBubble('assistant', '✓ Plan approved. Executing…');
 
   // ── Execution Phase ─────────────────────────────────────────────────
   let history = [...messages];
@@ -176,9 +179,7 @@ WORKFLOW RULES:
 4. Do not create fake commands and do not forget slashes between files in directories.
 5. When the task is fully complete, say "Done." with a brief summary of what was created/modified. This is the ONLY time you should stop.
 6. Do NOT re-read files you have already read. Do NOT repeat tool calls.
-
-APPROVED PLAN — execute this exactly:
-${approvedPlan}
+${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : ''}
 `,
   };
   if (history.length > 0 && history[0].role === 'system') {
