@@ -231,8 +231,10 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         const cwdCheck = resolveSafe(workspace, args.cwd || '.');
         if (!cwdCheck.ok) return { ok: false, error: cwdCheck.error };
         const timeout = args.timeout_ms || 30000;
+        // Quote args containing spaces for shell: true
+        const safeArgs = (args.args || []).map(a => a.includes(' ') ? `"${a}"` : a);
         const output  = await new Promise((resolve, reject) => {
-          cp.execFile(args.cmd, args.args || [], {
+          cp.execFile(args.cmd, safeArgs, {
             cwd: cwdCheck.resolved,
             timeout,
             maxBuffer: 1_000_000,
