@@ -236,7 +236,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
             cwd: cwdCheck.resolved,
             timeout,
             maxBuffer: 1_000_000,
-            shell: false,
+            shell: true,
           }, (err, stdout, stderr) => {
             if (err && !stdout && !stderr) return reject(err);
             resolve({ stdout: (stdout || '').slice(0, 100000), stderr: (stderr || '').slice(0, 10000), exitCode: err ? err.code : 0 });
