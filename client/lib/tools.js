@@ -66,12 +66,12 @@ const TOOL_DEFINITIONS = [
   // ── Tier B: mutating ───────────────────────────────────────────────
   {
     name: 'write_file',
-    description: 'Create a new file with content. MAXIMUM 80 lines per call. For longer files, write first 80 lines here, then use append_file for remaining chunks of 80 lines each. NEVER use for existing files — use edit_file.',
+    description: 'Create a new file. HARD LIMIT: 50 lines / 1500 chars MAX per call. For longer files: write_file first 50 lines, then append_file next 50 lines, repeat. NEVER put an entire file in one call. Use edit_file for existing files.',
     parameters: {
       type: 'object',
       properties: {
         path:    { type: 'string', description: 'Path to the file (relative to workspace root or absolute).' },
-        content: { type: 'string', description: 'Content to write. MAX 80 lines. Use append_file for rest.', maxLength: 2500 },
+        content: { type: 'string', description: 'File content. HARD LIMIT: 50 lines, 1500 chars. Use append_file for remaining parts.', maxLength: 1500 },
       },
       required: ['path', 'content'],
     },
@@ -79,12 +79,12 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'append_file',
-    description: 'Append content to end of existing file. MAX 80 lines per call. Use after write_file to continue writing a long file in chunks.',
+    description: 'Append content to end of existing file. HARD LIMIT: 50 lines / 1500 chars per call. Use after write_file to continue writing.',
     parameters: {
       type: 'object',
       properties: {
         path:    { type: 'string', description: 'Path to the file to append to.' },
-        content: { type: 'string', description: 'Content to append. MUST be under 2500 characters.', maxLength: 2500 },
+        content: { type: 'string', description: 'Content to append. HARD LIMIT: 1500 chars.', maxLength: 1500 },
       },
       required: ['path', 'content'],
     },

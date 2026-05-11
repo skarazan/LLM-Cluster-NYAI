@@ -247,11 +247,33 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     console.error(`[job] ${engine.type} error body: ${errBody.slice(0, 1000)}`);
 
     // llama.cpp returns 500 when tool call args JSON is too long / truncated.
-    // Return as assistant content so the model can retry with smaller args.
+    // Try to salvage partial content from the error so the client can write what exists.
     if (res.status === 500 && errBody.includes('Failed to parse tool call arguments')) {
-      console.warn('[job] tool call args too large for llama.cpp JSON parser — returning error as content');
+      console.warn('[job] tool call args too large for llama.cpp JSON parser — attempting to salvage');
+
+      // Try to extract path and partial content from the truncated JSON in error
+      let salvaged = null;
+      try {
+        const lastReadMatch = errBody.match(/last read:\s*'([^]*)'/);
+        const rawPartial = lastReadMatch ? lastReadMatch[1] : '';
+        // The error contains the raw JSON string the model was generating
+        // Try to find path and content fields
+        const pathMatch = errBody.match(/"path"\s*:\s*"([^"]+)"/);
+        const fnMatch = errBody.match(/"name"\s*:\s*"(write_file|append_file)"/);
+        if (pathMatch && fnMatch) {
+          salvaged = { tool: fnMatch[1], path: pathMatch[1] };
+          console.log(`[job] salvaged tool=${salvaged.tool} path=${salvaged.path}`);
+        }
+      } catch (e) {
+        console.warn('[job] salvage parse failed:', e.message);
+      }
+
+      const hint = salvaged
+        ? `\nThe model was trying to ${salvaged.tool}("${salvaged.path}") but the content was too large.`
+        : '';
+
       return {
-        content: 'ERROR: Your previous tool call failed because the arguments were too large (>4000 chars) and the JSON was truncated. Do NOT use write_file with large content. Instead:\n1. Use edit_file to make targeted changes to existing files\n2. For new files, break them into multiple smaller write_file calls\n3. Keep each tool call under 3000 characters of content',
+        content: `ERROR: Tool call JSON was truncated — content too large for a single call.${hint}\nYou MUST split large files:\n1. write_file with ONLY the first 50 lines\n2. append_file for each next 50 lines\n3. Each call MUST be under 1500 characters of content.\nDo NOT attempt to write the entire file in one call. Continue now.`,
         tool_calls: null,
         tokens: { prompt: 0, response: 0, total: 0, tokensPerSec: null },
       };
