@@ -388,7 +388,8 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
 
     // Send to backend — filter out file-body tools. Large source code is
     // streamed as text and written locally, never as llama.cpp tool-call JSON.
-    const filteredTools = forceTextWriteOnly ? [] : selectToolsForPhase(tools, taskTodos);
+    const stageContext = await resolveExecutionStage(taskTodos, workspace);
+    const filteredTools = forceTextWriteOnly ? [] : selectToolsForPhase(tools, taskTodos, stageContext);
     const activeToolNames = new Set(filteredTools.map(tool => tool.function?.name || tool.name).filter(Boolean));
     const outgoingMessages = injectAgentStateReplay(
       injectTodoStatus(
@@ -398,6 +399,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
       agentState,
       taskTodos,
       workspace,
+      stageContext,
     );
     setLoading(true);
     const r = await ipcRenderer.invoke('send-prompt', {
@@ -742,7 +744,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
         args = rawArgs;
       }
       if (!activeToolNames.has(toolName)) {
-        const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+        const first = stageContext.firstMissingTodo || getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
         const error = `Tool "${toolName}" is not enabled for the current phase.`;
         addActivity({
           kind: activityKindForTool(toolName),
@@ -755,9 +757,14 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
         if (first?.path) {
           history.push({
             role: 'user',
-            content: `${error}\nNext file todo: ${first.title} (${first.path})\nEmit a complete <write_file path="${first.path}"> block for that file now. Do not narrate.`,
+            content: `${error} Current execution stage is "${stageContext.name}".\nNext file todo: ${first.title} (${first.path})\nEmit a complete <write_file path="${first.path}"> block for that file now. Do not narrate.`,
           });
           forceTextWriteOnly = true;
+        }
+        if (recordRepeatedFailure(failureFingerprints, `blocked_${toolName}`, args.path || '', `${error}:${stageContext.name}`) >= 3) {
+          appendBubble('error', `Repeated blocked ${toolName} calls — stopping to avoid a loop.`);
+          shouldStopAgent = true;
+          await persistAgentState();
         }
         break;
       }
@@ -802,10 +809,35 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
         forceTextWriteOnly = true;
         break;
       }
+      if (stageContext.name === 'create_files' && ['edit_file', 'replace_file_range'].includes(toolName)) {
+        const targetPath = stageContext.firstMissingTodo?.path || args.path || stageContext.firstTodo?.path || '';
+        const error = `Cannot use ${toolName} while pending files still need initial creation. Create missing files first with <write_file>.`;
+        addActivity({
+          kind: 'edit',
+          status: 'error',
+          title: `Blocked ${toolName} in create stage`,
+          subtitle: targetPath,
+          detail: { tool: toolName, path: targetPath, status: 'blocked', error },
+        });
+        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error, stage: stageContext.name }) });
+        if (targetPath) {
+          history.push({
+            role: 'user',
+            content: `${error}\nNext missing file: ${targetPath}\nNow emit one complete <write_file path="${targetPath}"> block for the full file content. Do not call ${toolName}.`,
+          });
+          forceTextWriteOnly = true;
+        }
+        if (recordRepeatedFailure(failureFingerprints, `${toolName}_create_stage`, targetPath || '', error) >= 3) {
+          appendBubble('error', `Repeated ${toolName} calls during create stage — stopping to avoid a loop.`);
+          shouldStopAgent = true;
+          await persistAgentState();
+        }
+        break;
+      }
       if (['edit_file', 'replace_file_range'].includes(toolName) && args.path) {
         const fileState = await ipcRenderer.invoke('agent:get-file-state', { path: args.path, workspace });
         if (!fileState.ok || !fileState.snapshot?.isFile) {
-          const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+          const first = stageContext.firstMissingTodo || getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
           const error = `Cannot use ${toolName} on a missing/non-file path (${args.path}). Create it first with <write_file>.`;
           if (args.path) markTodoFailed(taskTodos, args.path, error);
           refreshTodoView();
@@ -819,7 +851,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
           history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error, needsCreate: true }) });
           history.push({
             role: 'user',
-            content: `${error}\n${first?.path ? `Next file todo: ${first.title} (${first.path})` : 'Use the pending file target from todo state.'}\nNow emit one complete <write_file path="${args.path}"> block for the full file content. Do not call ${toolName}.`,
+            content: `${error}\n${first?.path ? `Next file todo: ${first.title} (${first.path})` : 'Use the pending file target from todo state.'}\nNow emit one complete <write_file path="${first?.path || args.path}"> block for the full file content. Do not call ${toolName}.`,
           });
           forceTextWriteOnly = true;
           await persistAgentState();
@@ -989,9 +1021,9 @@ function redactSuspiciousToolOutput(toolResult) {
   return scrub(copy);
 }
 
-function selectToolsForPhase(tools, todos) {
+function selectToolsForPhase(tools, todos, stageContext = { name: 'general' }) {
   const pendingFileTodos = getPendingTodos(todos).some(todo => todo.path);
-  const allowedWhileWriting = new Set([
+  const readOnlyFilePrepTools = new Set([
     'read_file',
     'read_many_files',
     'file_state',
@@ -1000,12 +1032,89 @@ function selectToolsForPhase(tools, todos) {
     'glob',
     'grep',
   ]);
+  const editCapableTools = new Set([
+    ...readOnlyFilePrepTools,
+    'edit_file',
+    'replace_file_range',
+  ]);
   return tools.filter(tool => {
     const name = tool.function?.name || tool.name;
     if (TEXT_WRITE_TOOLS.has(name) || DISABLED_MODEL_TOOLS.has(name)) return false;
-    if (pendingFileTodos && !allowedWhileWriting.has(name)) return false;
-    return true;
+    if (!pendingFileTodos) return true;
+    if (stageContext.name === 'create_files') return readOnlyFilePrepTools.has(name);
+    if (stageContext.name === 'edit_existing_files') return editCapableTools.has(name);
+    return readOnlyFilePrepTools.has(name);
   });
+}
+
+async function resolveExecutionStage(todos, workspace) {
+  const pendingFiles = getPendingTodos(todos).filter(todo => todo.path);
+  if (pendingFiles.length === 0) {
+    return {
+      name: 'general',
+      firstTodo: null,
+      firstMissingTodo: null,
+      pendingFileCount: 0,
+    };
+  }
+
+  let firstMissingTodo = null;
+  for (const todo of pendingFiles.slice(0, 12)) {
+    try {
+      const state = await ipcRenderer.invoke('agent:get-file-state', { path: todo.path, workspace });
+      const isReadyFile = Boolean(state?.ok && state.snapshot?.isFile && Number(state.snapshot.bytes || 0) > 0);
+      if (!isReadyFile) {
+        firstMissingTodo = todo;
+        break;
+      }
+    } catch {
+      firstMissingTodo = todo;
+      break;
+    }
+  }
+
+  return {
+    name: firstMissingTodo ? 'create_files' : 'edit_existing_files',
+    firstTodo: pendingFiles[0],
+    firstMissingTodo,
+    pendingFileCount: pendingFiles.length,
+  };
+}
+
+function formatStageHint(stageContext) {
+  if (!stageContext || stageContext.name === 'general') return 'Execution stage: general.';
+  if (stageContext.name === 'create_files') {
+    const next = stageContext.firstMissingTodo?.path || stageContext.firstTodo?.path || '';
+    return `Execution stage: create_files. Create missing files first with <write_file>.${next ? ` Next missing file: ${next}` : ''}`;
+  }
+  if (stageContext.name === 'edit_existing_files') {
+    const next = stageContext.firstTodo?.path || '';
+    return `Execution stage: edit_existing_files. Missing files were created; edits/replacements are now allowed.${next ? ` Current target: ${next}` : ''}`;
+  }
+  return `Execution stage: ${stageContext.name}.`;
+}
+
+function injectAgentStateReplay(messages, agentState, todos, workspace, stageContext = null) {
+  const replay = buildAgentStateReplay(agentState, todos, workspace, stageContext);
+  return replay ? [...messages, { role: 'user', content: replay }] : messages;
+}
+
+function buildAgentStateReplay(agentState, todos, workspace, stageContext = null) {
+  const doneTodos = todos.filter(t => t.status === 'done').slice(-12);
+  const pendingTodos = todos.filter(t => t.status !== 'done').slice(0, 8);
+  const files = (agentState.fileHistory || []).slice(-12);
+  const failures = files.filter(f => !f.ok).slice(-5);
+  const changed = files.filter(f => f.ok && f.changed !== false).slice(-8);
+  const parts = [
+    `APP STATE REPLAY (authoritative, not model memory). Workspace: ${workspace}`,
+  ];
+  if (stageContext) parts.push(formatStageHint(stageContext));
+  if (doneTodos.length) parts.push(`Verified done:\n${doneTodos.map(t => `- ${t.title}${t.path ? ` (${t.path})` : ''}${t.evidence?.afterHash ? ` hash=${String(t.evidence.afterHash).slice(0, 12)}` : ''}`).join('\n')}`);
+  if (pendingTodos.length) parts.push(`Pending/failed:\n${pendingTodos.map(t => `- [${t.status}] ${t.title}${t.path ? ` (${t.path})` : ''}${t.error ? ` error=${t.error}` : ''}`).join('\n')}`);
+  if (changed.length) parts.push(`Recent verified file changes:\n${changed.map(f => `- ${f.action} ${f.path} ok=${f.ok} bytes=${f.afterBytes ?? '?'} hash=${String(f.afterHash || '').slice(0, 12)}${f.repairedDirectory ? ' repaired-empty-directory=true' : ''}`).join('\n')}`);
+  if (failures.length) parts.push(`Latest failed actions to avoid/recover:\n${failures.map(f => `- ${f.action} ${f.path}: ${f.error}`).join('\n')}`);
+  parts.push('Use this replay to resume. Do not recreate existing workspace folders. Do not mark files done unless the app verifies the actual target file.');
+  return parts.join('\n\n');
 }
 
 function normalizeAgentState(state, workspace) {
@@ -1107,28 +1216,6 @@ function recordFileHistory(agentState, path, action, toolResult, preview = '') {
     timestamp: new Date().toISOString(),
   };
   agentState.fileHistory = [...(agentState.fileHistory || []), entry].slice(-200);
-}
-
-function injectAgentStateReplay(messages, agentState, todos, workspace) {
-  const replay = buildAgentStateReplay(agentState, todos, workspace);
-  return replay ? [...messages, { role: 'user', content: replay }] : messages;
-}
-
-function buildAgentStateReplay(agentState, todos, workspace) {
-  const doneTodos = todos.filter(t => t.status === 'done').slice(-12);
-  const pendingTodos = todos.filter(t => t.status !== 'done').slice(0, 8);
-  const files = (agentState.fileHistory || []).slice(-12);
-  const failures = files.filter(f => !f.ok).slice(-5);
-  const changed = files.filter(f => f.ok && f.changed !== false).slice(-8);
-  const parts = [
-    `APP STATE REPLAY (authoritative, not model memory). Workspace: ${workspace}`,
-  ];
-  if (doneTodos.length) parts.push(`Verified done:\n${doneTodos.map(t => `- ${t.title}${t.path ? ` (${t.path})` : ''}${t.evidence?.afterHash ? ` hash=${String(t.evidence.afterHash).slice(0, 12)}` : ''}`).join('\n')}`);
-  if (pendingTodos.length) parts.push(`Pending/failed:\n${pendingTodos.map(t => `- [${t.status}] ${t.title}${t.path ? ` (${t.path})` : ''}${t.error ? ` error=${t.error}` : ''}`).join('\n')}`);
-  if (changed.length) parts.push(`Recent verified file changes:\n${changed.map(f => `- ${f.action} ${f.path} ok=${f.ok} bytes=${f.afterBytes ?? '?'} hash=${String(f.afterHash || '').slice(0, 12)}${f.repairedDirectory ? ' repaired-empty-directory=true' : ''}`).join('\n')}`);
-  if (failures.length) parts.push(`Latest failed actions to avoid/recover:\n${failures.map(f => `- ${f.action} ${f.path}: ${f.error}`).join('\n')}`);
-  parts.push('Use this replay to resume. Do not recreate existing workspace folders. Do not mark files done unless the app verifies the actual target file.');
-  return parts.join('\n\n');
 }
 
 /** Returns true if the user needs to approve this call. */
@@ -1778,29 +1865,28 @@ async function verifySpecificTodoFile(path, workspace) {
 
 function shouldContinueAfterPlainResponse(text, toolCallCount, continuationCount, todos = []) {
   const pending = getPendingTodos(todos);
-  const limit = pending.length > 0 ? 8 : 3;
+  const limit = pending.length > 0 ? 5 : 3;
   if (continuationCount >= limit) return false;
 
   const normalized = text.toLowerCase().trim();
-  if (!normalized || /\bdone\b|completed|finished|all files|task is complete/.test(normalized)) return false;
+  if (!normalized) return false;
+  const completionMarkers = /\b(done|completed|finished|all files|task is complete|all set|that's all|that is all|let me know if)\b/;
+  if (completionMarkers.test(normalized)) return false;
   if (pending.length > 0) return true;
   if (toolCallCount === 0) return false;
 
-  const progressOnlyPatterns = [
-    /\bnow let me\b/,
-    /\blet me start\b/,
-    /\blet me (create|add|build|write|update|implement)\b/,
-    /\bi'?ll (start|create|add|build|write|update|implement|continue)\b/,
-    /\bstarting (with|on)\b/,
-    /\bstart by (creating|adding|building|writing|updating|implementing)\b/,
-    /\bnext,?\s+(i|let me|we)\b/,
+  const continuationSignals = [
+    /\bso now (i|let me|we) (need to|have to|should|must|will) (do|create|write|edit|update|fix|implement|add|run|check|make|build|set up)\b/,
+    /\bnow i('ll| will) (do|create|write|edit|update|fix|implement|add|run|check|make|build|set up|go|proceed)\b/,
+    /\blet me (go ahead and |now )?(do|create|write|edit|update|fix|implement|add|run|check|make|build|set up|proceed)\b/,
+    /\btime to (do|create|write|edit|update|fix|implement|add|run|check|make|build|get started|begin)\b/,
+    /\bnext,?\s+(i('ll| will)|let me|i need to) (do|create|write|edit|update|fix|implement|add|run|check|make|build)\b/,
     /\bcontinue (with|by|to)\b/,
     /\bremaining files?\b/,
-    /\bcreate all the files\b/,
     /:\s*$/,
   ];
 
-  return progressOnlyPatterns.some(pattern => pattern.test(normalized));
+  return continuationSignals.some(pattern => pattern.test(normalized));
 }
 
 function recordPlainResponse(responses, text) {
@@ -1918,48 +2004,7 @@ function extractToolCallsFromText(text, history = []) {
   }
   if (calls.length > 0) return calls;
 
-  // Pattern 2: JSON objects with "name" + "arguments"/"parameters"
-  const objects = extractJsonObjects(text);
-  for (const obj of objects) {
-    if (obj.name && (obj.arguments || obj.parameters) && !TEXT_WRITE_TOOLS.has(obj.name)) {
-      calls.push({
-        id: `fallback_${idCounter++}`,
-        type: 'function',
-        function: { name: obj.name, arguments: obj.arguments || obj.parameters },
-      });
-    }
-  }
-  if (calls.length > 0) return calls;
-
   return calls;
-}
-
-/** Extract all top-level balanced JSON objects from a string. */
-function extractJsonObjects(text) {
-  const results = [];
-  let i = 0;
-  while (i < text.length) {
-    if (text[i] === '{') {
-      // Find the matching closing brace
-      let depth = 0;
-      let j = i;
-      while (j < text.length) {
-        if (text[j] === '{') depth++;
-        else if (text[j] === '}') { depth--; if (depth === 0) break; }
-        j++;
-      }
-      if (depth === 0) {
-        try {
-          const obj = JSON.parse(text.slice(i, j + 1));
-          results.push(obj);
-        } catch { /* not valid JSON */ }
-        i = j + 1;
-        continue;
-      }
-    }
-    i++;
-  }
-  return results;
 }
 
 /** Render a collapsible thinking block in the chat container. */
