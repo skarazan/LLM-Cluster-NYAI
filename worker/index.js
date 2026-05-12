@@ -335,8 +335,11 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
         ? `\nCRITICAL: HTML attributes with double quotes (charset="UTF-8") CRASH the JSON parser. Use SINGLE QUOTES for ALL HTML attributes: charset='UTF-8', name='viewport', etc.`
         : '';
 
+      const startTag = salvaged?.path ? `\nStart with: <${salvaged.tool} path="${salvaged.path}">` : '';
+      const endTag = salvaged?.tool ? `\nEnd with: </${salvaged.tool}>` : '';
+
       return {
-        content: `ERROR: Native tool-call JSON was truncated.${hint}${htmlFix}\nYou MUST stop using JSON tool calls for file contents. Continue by outputting plain text blocks only, using the real absolute target path from the workspace/task:\n<write_file path="/real/workspace/filename.ext">full file content here</write_file>\nor\n<append_file path="/real/workspace/filename.ext">more content here</append_file>\nNever use placeholder paths like /file or /absolute/path/to/file. Do not call write_file or append_file as tools.`,
+        content: `ERROR: Native tool-call JSON was truncated.${hint}${htmlFix}\nYou MUST stop using JSON tool calls for file contents. Continue by outputting exactly one plain text file block with the real absolute target path from the workspace/task.${startTag}\nThen write the complete real source code for that file.${endTag}\nIf no path is shown above, use the exact pending file path from the current workspace/task state. For appends, use the same pattern with append_file opening and closing tags.\nNever write placeholder paths or placeholder body text. Do not call write_file or append_file as tools.`,
         tool_calls: null,
         tokens: { prompt: 0, response: 0, total: 0, tokensPerSec: null },
       };

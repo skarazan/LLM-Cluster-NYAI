@@ -443,7 +443,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
     // These never become native tool calls because llama.cpp's JSON parser is
     // fragile with large escaped source files.
     if (data.response) {
-      const writeBlocks = extractTextWriteBlocks(data.response, history);
+      const writeBlocks = extractTextWriteBlocks(data.response, history, taskTodos);
       for (let block of writeBlocks) {
         const normalized = normalizeTextWriteBlockPath(block, taskTodos, workspace);
         if (!normalized.ok) {
@@ -539,7 +539,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
         await persistAgentState();
       }
       if (writeBlocks.length > 0) {
-        data.response = stripTextWriteBlocks(data.response).trim();
+        data.response = stripTextWriteBlocks(data.response, history, taskTodos).trim();
         overflowRetries = 0;
         forceTextWriteOnly = false;
         // If there was only file writes and no other content, loop for next action
@@ -564,7 +564,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
       }
     }
 
-    if ((!data.tool_calls || data.tool_calls.length === 0) && data.response) {
+    if (filteredTools.length > 0 && (!data.tool_calls || data.tool_calls.length === 0) && data.response) {
       const extracted = extractToolCallsFromText(data.response, history);
       if (extracted.length > 0) {
         data.tool_calls = extracted;
@@ -582,7 +582,11 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
       appendBubble('error', `Tool call too large — retry ${overflowRetries}/2…`);
       forceTextWriteOnly = true;
       history.push({ role: 'assistant', content: data.response });
-      history.push({ role: 'user', content: 'CRITICAL: Native JSON tool calling crashed while trying to write a file. For the next response, DO NOT call any tools. Output only file-write text blocks with the real target filename under "' + workspace + '". Example: <write_file path="' + workspace + '/index.html">...</write_file>. Put the full code between the tags as plain text. Never use /file or /absolute/path/to/file. If the task is already complete, say "Done." instead.' });
+      const retryTarget = getPendingTodos(taskTodos).find(todo => todo.path)?.path || workspace;
+      const targetInstruction = retryTarget === workspace
+        ? `Use the exact pending file path from the current workspace/task state under "${workspace}".`
+        : `Start with <write_file path="${retryTarget}">, then write the complete real source code, then close with </write_file>.`;
+      history.push({ role: 'user', content: `CRITICAL: Native JSON tool calling crashed while trying to write a file. For the next response, DO NOT call any tools. Output exactly one file-write text block with the real target filename. ${targetInstruction} Never use /file, /absolute/path/to/file, or placeholder body text. If the task is already complete, say "Done." instead.` });
       continue;
     }
 
@@ -819,7 +823,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
             updateReadStateFromToolResult(agentState, args.path, readResult);
             toolResult = {
               ok: false,
-              error: `old_string not found. Current file content:\n${readResult.result}\n\nUse a <write_file path="...">...</write_file> text block to rewrite the whole file with your changes applied.`,
+              error: `old_string not found. Current file content:\n${readResult.result}\n\nRewrite the whole file with your changes applied using this exact opening tag: <write_file path="${args.path}"> and close it with </write_file>.`,
             };
           }
         }
@@ -1186,7 +1190,7 @@ function chunkFileContent(content) {
   return chunks.length ? chunks : [''];
 }
 
-function extractTextWriteBlocks(text, history = []) {
+function extractTextWriteBlocks(text, history = [], todos = []) {
   const blocks = [];
 
   const xmlRe = /<(write_file|append_file)\s+path=(["'])([^"']+)\2>([\s\S]*?)<\/\1>/g;
@@ -1215,7 +1219,11 @@ function extractTextWriteBlocks(text, history = []) {
   // "path/to/file.js" followed by a markdown code block.
   const codeBlockRe = /(?:(?:\*\*|`)?([^\s`*()\n]+)(?:\*\*|`)?\s*\n)?```[a-zA-Z]*\n([\s\S]*?)```/g;
   for (const match of text.matchAll(codeBlockRe)) {
-    const filename = inferCodeBlockFilename(text, match, history);
+    let filename = inferCodeBlockFilename(text, match, history);
+    if (!filename) {
+      const pendingFiles = getPendingTodos(todos).filter(todo => todo.path);
+      if (pendingFiles.length > 0) filename = pendingFiles[0].path;
+    }
     const content = match[2];
     if (!filename || !looksLikeSourcePath(filename) || !content || content.trim().length < 10) continue;
     blocks.push({
@@ -1229,10 +1237,10 @@ function extractTextWriteBlocks(text, history = []) {
   return blocks;
 }
 
-function stripTextWriteBlocks(text) {
+function stripTextWriteBlocks(text, history = [], todos = []) {
   let stripped = text.replace(/<(write_file|append_file)\s+path=(["'])([^"']+)\2>[\s\S]*?<\/\1>/g, '');
   stripped = stripped.replace(/<<<FILE\s+path=(["'])([^"']+)\1(?:\s+mode=(["']?)(write|append)\3)?\s*\n[\s\S]*?\n?<<<END_FILE/g, '');
-  const blocks = extractTextWriteBlocks(stripped);
+  const blocks = extractTextWriteBlocks(stripped, history, todos);
   for (const block of blocks) {
     stripped = stripped.replace(block.fullMatch, '');
   }
@@ -1789,10 +1797,13 @@ function buildRepeatedPlainNudge(text, todos, workspace) {
   const directoryFileHint = /directory.+instead of a file|cannot delete|remove the directory/i.test(text)
     ? `\nIf a directory exists where a file should be, do not delete it with delete_file and do not narrate. Emit the exact <write_file> block for the target file; the client can repair an empty accidental directory at that path.`
     : '';
+  const fileBlockInstruction = target
+    ? `start with <write_file path="${target}">, write the complete real file contents, then close with </write_file>, or`
+    : 'identify the next concrete file path with inspect_project/read/list tools, then write it, or';
   return `You repeated the same progress-only message without doing work. Stop narrating and perform the next concrete action now.${directoryFileHint}
 First unfinished todo: ${first ? `${first.title}${target ? ` (${target})` : ''}` : 'unknown'}
 Valid next output:
-- a complete <write_file path="${target || `${workspace}/filename.ext`}">...</write_file> block, or
+- ${fileBlockInstruction}
 - a necessary read/list/edit tool call only if you need current file content.
 Do not call run_shell or create_dir while file todos are pending. Do not say Done.`;
 }

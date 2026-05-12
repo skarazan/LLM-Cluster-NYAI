@@ -777,7 +777,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         if (FILE_LIKE_EXTENSION_RE.test(path.basename(check.resolved))) {
           return {
             ok: false,
-            error: `create_dir was called with a file-looking path (${args.path}). Use <write_file path="${args.path}">...</write_file> to create the file instead.`,
+            error: `create_dir was called with a file-looking path (${args.path}). Start a file block with <write_file path="${args.path}">, write the real file contents, then close it with </write_file>.`,
             pathLooksLikeFile: true,
           };
         }
@@ -785,7 +785,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         if (knownTodoFilePaths.includes(String(args.path)) || knownTodoFilePaths.includes(check.resolved)) {
           return {
             ok: false,
-            error: `create_dir was called for a known file todo (${args.path}). Use <write_file path="${args.path}">...</write_file> to create the file instead.`,
+            error: `create_dir was called for a known file todo (${args.path}). Start a file block with <write_file path="${args.path}">, write the real file contents, then close it with </write_file>.`,
             pathLooksLikeFile: true,
           };
         }

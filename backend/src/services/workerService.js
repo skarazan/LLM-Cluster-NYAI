@@ -361,9 +361,9 @@ function submitJobResult(jobId, result, error) {
 
   if (error) {
     const errorPayload = typeof error === 'object' ? error : null;
-    setJobStatus(jobId, errorPayload?.status || 'completed', { ok: false, error, finishReason: result?.finish_reason || null });
+    setJobStatus(jobId, errorPayload?.status || 'failed', { ok: false, error, finishReason: result?.finish_reason || null });
     const err = new Error(typeof error === 'string' ? error : (error.message || 'Worker error'));
-    err.payload = errorPayload || { retryable: true, stage: 'worker', jobId, status: 'completed' };
+    err.payload = errorPayload || { retryable: true, stage: 'worker', jobId, status: 'failed' };
     job.reject(err);
   } else {
     setJobStatus(jobId, 'completed', { ok: true, finishReason: result?.finish_reason || null });
