@@ -171,6 +171,7 @@ async function deregister(managerUrl, id) {
 async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   const messages = wrapMessages(job.messages, job.tools);
   const startMs = Date.now();
+  const isCodeAgent = job.agentMode === 'code';
 
   // ── Debug: audit the message array being sent ──────────────────────
   const msgSummary = messages.map((m, i) => {
@@ -188,23 +189,29 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   if (engine.openai) {
     url = `${engine.url}/v1/chat/completions`;
     const hasTools = job.tools && job.tools.length > 0;
+    const maxTokens = isCodeAgent
+      ? Number(process.env.LLM_CODE_MAX_TOKENS || 8192)
+      : Number(process.env.LLM_CHAT_MAX_TOKENS || -1);
     body = {
       model: job.model,
       messages,
       stream: true,
       stream_options: { include_usage: true },
-      max_tokens: -1,
-      temperature: 0.8,
-      presence_penalty: 1.2,
-      frequency_penalty: 0.4,
-      cache_prompt: true,
+      max_tokens: maxTokens,
+      temperature: isCodeAgent ? Number(process.env.LLM_CODE_TEMPERATURE || 0.25) : 0.7,
+      top_p: isCodeAgent ? Number(process.env.LLM_CODE_TOP_P || 0.9) : 0.95,
+      presence_penalty: 0,
+      frequency_penalty: 0,
+      cache_prompt: process.env.LLM_CACHE_PROMPT === '1',
     };
     if (hasTools) {
       body.tools = job.tools;
       body.tool_choice = 'auto';
-      // Disable thinking when tools are active — saves all output tokens for
-      // tool call arguments instead of wasting them on <think> blocks.
-      // Qwen3 respects this via chat_template_kwargs.
+    }
+    if (isCodeAgent || hasTools) {
+      // Qwen3 respects this via chat_template_kwargs. Keep it off for all
+      // agent steps, including text-only file blocks, so output tokens go to
+      // actions instead of hidden reasoning.
       body.chat_template_kwargs = { enable_thinking: false };
     }
   } else {
@@ -213,7 +220,14 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       model: job.model,
       messages,
       stream: false,
-      options: { num_thread: maxThreads, num_ctx: numCtx },
+      options: {
+        num_thread: maxThreads,
+        num_ctx: numCtx,
+        temperature: isCodeAgent ? Number(process.env.LLM_CODE_TEMPERATURE || 0.25) : 0.7,
+        top_p: isCodeAgent ? Number(process.env.LLM_CODE_TOP_P || 0.9) : 0.95,
+        repeat_penalty: 1.0,
+        num_predict: isCodeAgent ? Number(process.env.LLM_CODE_MAX_TOKENS || 8192) : -1,
+      },
     };
     if (job.tools && job.tools.length > 0) body.tools = job.tools;
   }
@@ -370,6 +384,10 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     const built = Object.values(toolCallsMap);
     toolCalls = built.length ? built : null;
 
+    if (sseErrors.length && !content && !toolCalls) {
+      throw new Error(`${engine.type} stream error: ${sseErrors.join(' | ').slice(0, 500)}`);
+    }
+
     if (toolCalls) {
       console.log(`[stream] tool_calls: ${toolCalls.map(tc => `${tc.function.name}(${tc.function.arguments.slice(0, 80)})`).join(', ')}`);
     }
@@ -480,21 +498,41 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
     const job = data.job;
     console.log(`[job] received jobId=${job.id} model=${job.model}`);
 
-    // Real-time chunk forwarder — fire-and-forget, no batching delay
-    const onChunk = (content) => {
+    // Real-time chunk forwarder — batch small deltas to avoid hundreds of HTTP
+    // posts per response over the tunnel.
+    let chunkBuffer = '';
+    let chunkTimer = null;
+    const flushChunks = () => {
+      if (!chunkBuffer) return;
+      const content = chunkBuffer;
+      chunkBuffer = '';
+      if (chunkTimer) {
+        clearTimeout(chunkTimer);
+        chunkTimer = null;
+      }
       fetch(`${managerUrl}/workers/chunk`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jobId: job.id, content }),
       }).catch(() => {});
     };
+    const onChunk = (content) => {
+      chunkBuffer += content;
+      if (chunkBuffer.length >= 1200) {
+        flushChunks();
+      } else if (!chunkTimer) {
+        chunkTimer = setTimeout(flushChunks, 80);
+      }
+    };
 
     let result = null;
     let error  = null;
     try {
       result = await runJob(job, engine, maxThreads, numCtx, onChunk);
+      flushChunks();
       console.log(`[job] completed jobId=${job.id} tokens=${result.tokens.total}`);
     } catch (err) {
+      flushChunks();
       error = err.message;
       console.error(`[job] failed jobId=${job.id}: ${err.message}`);
     }

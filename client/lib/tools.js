@@ -10,13 +10,13 @@ const TOOL_DEFINITIONS = [
   // ── Tier A: read-only ──────────────────────────────────────────────
   {
     name: 'read_file',
-    description: 'Read the contents of a file inside the workspace. Use offset and limit to read large files in chunks.',
+    description: 'Read part of a file inside the workspace. Defaults to 300 lines. Use offset and limit for large files; never read huge files all at once.',
     parameters: {
       type: 'object',
       properties: {
         path:   { type: 'string', description: 'Path to the file (relative to workspace root or absolute).' },
         offset: { type: 'number', description: 'Line number to start reading from (1-indexed). Optional.' },
-        limit:  { type: 'number', description: 'Maximum number of lines to read. Optional.' },
+        limit:  { type: 'number', description: 'Maximum number of lines to read. Optional, max 1000.' },
       },
       required: ['path'],
     },
@@ -101,6 +101,21 @@ const TOOL_DEFINITIONS = [
         new_string: { type: 'string', description: 'Replacement text.' },
       },
       required: ['path', 'old_string', 'new_string'],
+    },
+    risk: 'write',
+  },
+  {
+    name: 'replace_file_range',
+    description: 'Replace an inclusive line range in an existing file. Prefer this when edit_file old_string matching is brittle. Read the target file first, then replace only the needed lines.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path:       { type: 'string', description: 'Path to the file.' },
+        start_line: { type: 'number', description: 'First line to replace, 1-indexed.' },
+        end_line:   { type: 'number', description: 'Last line to replace, inclusive. Use same as start_line to replace one line.' },
+        content:    { type: 'string', description: 'Replacement content for that line range. Keep under 6000 chars; use file blocks for bigger rewrites.', maxLength: 6000 },
+      },
+      required: ['path', 'start_line', 'end_line', 'content'],
     },
     risk: 'write',
   },

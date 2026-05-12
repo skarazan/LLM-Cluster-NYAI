@@ -11,6 +11,12 @@ let mainWindow;
 const RELEASES_URL = 'https://github.com/skarazan/LLM-Cluster-NYAI/releases/latest';
 const RELEASES_API = 'https://api.github.com/repos/skarazan/LLM-Cluster-NYAI/releases/latest';
 const MAX_NATIVE_WRITE_CHARS = 7000;
+const DEFAULT_READ_LINES = 300;
+const MAX_READ_LINES = 1000;
+const MAX_LIST_ENTRIES = 500;
+const MAX_SEARCH_RESULTS = 200;
+const IGNORE_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.vite', 'coverage', '.cache']);
+const activePromptControllers = new Map();
 
 // --- Update check: compare current version against latest GitHub release ---
 async function checkForUpdates() {
@@ -78,14 +84,19 @@ ipcMain.handle('ping-backend', async (event, { backendUrl }) => {
 
 // Forward chat requests from renderer to backend (avoids CORS issues)
 // Streams token chunks via IPC 'stream-chunk' events before returning the final response.
-ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools }) => {
+ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools, requestId, agentMode }) => {
+  const controller = new AbortController();
+  if (requestId) activePromptControllers.set(requestId, controller);
   try {
     const body = { messages, model };
     if (tools && tools.length > 0) body.tools = tools;
+    if (requestId) body.requestId = requestId;
+    if (agentMode) body.agentMode = agentMode;
     const res = await fetch(`${backendUrl}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
 
     const decoder = new TextDecoder();
@@ -116,11 +127,30 @@ ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools
     }
 
     if (!finalData) throw new Error('No response received from server');
-    if (!res.ok) throw new Error(finalData.error || `HTTP ${res.status}`);
+    if (finalData.error) throw new Error(finalData.error);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return { ok: true, data: finalData };
   } catch (err) {
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.name === 'AbortError' ? 'Request cancelled' : err.message };
+  } finally {
+    if (requestId) activePromptControllers.delete(requestId);
   }
+});
+
+ipcMain.handle('cancel-prompt', async (event, { backendUrl, requestId }) => {
+  if (!requestId) return { ok: false, error: 'Missing requestId' };
+  const controller = activePromptControllers.get(requestId);
+  if (controller) controller.abort();
+  try {
+    await fetch(`${backendUrl}/chat/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId }),
+    });
+  } catch {
+    // The local abort matters most; the manager may already have finished.
+  }
+  return { ok: true };
 });
 
 // ── Agent: workspace picker ──────────────────────────────────────────────────
@@ -148,30 +178,31 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         const raw = await fs.readFile(check.resolved, 'utf8');
         const lines = raw.split('\n');
         const off   = Math.max(0, (args.offset || 1) - 1);
-        const lim   = args.limit || lines.length;
-        return { ok: true, result: lines.slice(off, off + lim).join('\n') };
+        const lim   = Math.min(Math.max(1, args.limit || DEFAULT_READ_LINES), MAX_READ_LINES);
+        const end = Math.min(lines.length, off + lim);
+        const body = lines.slice(off, end).join('\n');
+        const suffix = end < lines.length ? `\n\n[read_file truncated: showing lines ${off + 1}-${end} of ${lines.length}. Call read_file with offset=${end + 1} to continue.]` : '';
+        return { ok: true, result: body + suffix };
       }
 
       case 'list_dir': {
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
         const entries = await fs.readdir(check.resolved, { withFileTypes: true });
-        const list = entries.map(e => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' }));
-        return { ok: true, result: list };
+        const visible = entries
+          .filter(e => !IGNORE_DIRS.has(e.name))
+          .slice(0, MAX_LIST_ENTRIES)
+          .map(e => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' }));
+        const truncated = entries.length > visible.length;
+        return { ok: true, result: truncated ? { entries: visible, truncated: true, limit: MAX_LIST_ENTRIES } : visible };
       }
 
       case 'glob': {
         const rootPath = args.root ? args.root : '.';
         const check = resolveSafe(workspace, rootPath);
         if (!check.ok) return { ok: false, error: check.error };
-        // Use Node glob (available in Node 22+) or fall back to simple recursive walk
-        const { glob } = require('fs');
-        const matches = await new Promise((resolve, reject) => {
-          glob(args.pattern, { cwd: check.resolved }, (err, files) => {
-            if (err) reject(err); else resolve(files);
-          });
-        });
-        return { ok: true, result: matches };
+        const matches = await simpleGlob(check.resolved, args.pattern);
+        return { ok: true, result: matches.slice(0, MAX_SEARCH_RESULTS), truncated: matches.length > MAX_SEARCH_RESULTS };
       }
 
       case 'grep': {
@@ -181,7 +212,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         const useRegex = args.regex !== false;
         const pattern  = useRegex ? new RegExp(args.pattern) : args.pattern;
         const results  = await grepDir(check.resolved, pattern, args.glob || null, useRegex);
-        return { ok: true, result: results };
+        return { ok: true, result: results.slice(0, MAX_SEARCH_RESULTS), truncated: results.length > MAX_SEARCH_RESULTS };
       }
 
       case 'write_file': {
@@ -218,6 +249,26 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         return { ok: true, result: `Edited ${check.resolved}` };
       }
 
+      case 'replace_file_range': {
+        if (String(args.content || '').length > MAX_NATIVE_WRITE_CHARS) {
+          return { ok: false, error: `replace_file_range content is too large (${String(args.content || '').length} chars). Use <write_file> text blocks for large rewrites.` };
+        }
+        const check = resolveSafe(workspace, args.path);
+        if (!check.ok) return { ok: false, error: check.error };
+        const start = Number(args.start_line);
+        const end = Number(args.end_line);
+        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
+          return { ok: false, error: 'replace_file_range requires valid 1-indexed start_line and end_line' };
+        }
+        const raw = await fs.readFile(check.resolved, 'utf8');
+        const lines = raw.split('\n');
+        if (end > lines.length) return { ok: false, error: `Line range ${start}-${end} exceeds file length ${lines.length}` };
+        const replacement = String(args.content || '').split('\n');
+        lines.splice(start - 1, end - start + 1, ...replacement);
+        await fs.writeFile(check.resolved, lines.join('\n'), 'utf8');
+        return { ok: true, result: `Replaced lines ${start}-${end} in ${check.resolved}` };
+      }
+
       case 'create_dir': {
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
@@ -238,14 +289,13 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         const cwdCheck = resolveSafe(workspace, args.cwd || '.');
         if (!cwdCheck.ok) return { ok: false, error: cwdCheck.error };
         const timeout = args.timeout_ms || 30000;
-        // Quote args containing spaces for shell: true
-        const safeArgs = (args.args || []).map(a => a.includes(' ') ? `"${a}"` : a);
+        const safeArgs = (args.args || []).map(a => String(a));
         const output  = await new Promise((resolve, reject) => {
           cp.execFile(args.cmd, safeArgs, {
             cwd: cwdCheck.resolved,
             timeout,
             maxBuffer: 1_000_000,
-            shell: true,
+            shell: false,
           }, (err, stdout, stderr) => {
             if (err && !stdout && !stderr) return reject(err);
             resolve({ stdout: (stdout || '').slice(0, 100000), stderr: (stderr || '').slice(0, 10000), exitCode: err ? err.code : 0 });
@@ -390,13 +440,16 @@ function extractJsIds(js) {
 async function grepDir(root, pattern, globFilter, useRegex) {
   const results = [];
   async function walk(dir) {
+    if (results.length >= MAX_SEARCH_RESULTS * 2) return;
     let entries;
     try { entries = await fs.readdir(dir, { withFileTypes: true }); }
     catch { return; }
     for (const entry of entries) {
+      if (results.length >= MAX_SEARCH_RESULTS * 2) return;
       if (entry.name.startsWith('.')) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
+        if (IGNORE_DIRS.has(entry.name)) continue;
         await walk(full);
       } else {
         if (globFilter) {
@@ -416,6 +469,41 @@ async function grepDir(root, pattern, globFilter, useRegex) {
   }
   await walk(root);
   return results;
+}
+
+async function simpleGlob(root, pattern) {
+  const results = [];
+  const matcher = globToRegExp(pattern || '**/*');
+  async function walk(dir, relDir = '') {
+    if (results.length >= MAX_SEARCH_RESULTS * 2) return;
+    let entries;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); }
+    catch { return; }
+    for (const entry of entries) {
+      if (results.length >= MAX_SEARCH_RESULTS * 2) return;
+      if (IGNORE_DIRS.has(entry.name)) continue;
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full, rel);
+      } else if (matcher.test(rel)) {
+        results.push(rel);
+      }
+    }
+  }
+  await walk(root);
+  return results;
+}
+
+function globToRegExp(pattern) {
+  let source = String(pattern)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '\0')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replace(/\0/g, '.*');
+  if (source.startsWith('.*/')) source = '(?:.*/)?' + source.slice(3);
+  return new RegExp(`^${source}$`);
 }
 
 // mDNS discovery — browse for managers on the LAN for up to 2.5s

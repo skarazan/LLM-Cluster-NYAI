@@ -85,6 +85,7 @@ function summariseArgs(toolName, args) {
   if (toolName === 'grep')       return `"${args.pattern}"${args.path ? `, "${args.path}"` : ''}`;
   if (toolName === 'write_file') return `"${args.path}"`;
   if (toolName === 'edit_file')  return `"${args.path}"`;
+  if (toolName === 'replace_file_range') return `"${args.path}", lines ${args.start_line}-${args.end_line}`;
   if (toolName === 'create_dir') return `"${args.path}"`;
   if (toolName === 'delete_file') return `"${args.path}"`;
   if (toolName === 'run_shell')  return `${args.cmd}${args.args ? ' ' + args.args.join(' ') : ''}`;
@@ -101,6 +102,11 @@ function buildPreview(toolName, args) {
     const lines = (args.content || '').split('\n');
     const preview = lines.slice(0, 8).map(l => `+ ${l}`).join('\n');
     return lines.length > 8 ? preview + `\n+ … (${lines.length} lines total)` : preview;
+  }
+  if (toolName === 'replace_file_range') {
+    const lines = (args.content || '').split('\n');
+    const preview = lines.slice(0, 12).map(l => `+ ${l}`).join('\n');
+    return `@@ ${args.start_line}-${args.end_line} @@\n${lines.length > 12 ? preview + `\n+ … (${lines.length} lines total)` : preview}`;
   }
   if (toolName === 'run_shell') {
     return `$ ${args.cmd}${args.args ? ' ' + args.args.join(' ') : ''}`;

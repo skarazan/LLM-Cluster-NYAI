@@ -183,19 +183,30 @@ function getAllWorkers()  { return Array.from(workers.values()); }
 // ---------- Pull-based job dispatch ----------
 
 // Called by chatRoutes: push a job and wait for the worker to run it
-function sendPromptToWorker(worker, messages, model, tools, jobId) {
+function sendPromptToWorker(worker, messages, model, tools, jobId, meta = {}) {
   if (!jobId) jobId = randomUUID();
   return new Promise((resolve, reject) => {
 
     const timer = setTimeout(() => {
       pendingJobs.delete(jobId);
-      decInflight(worker.id);
       const err = new Error(`Worker ${worker.name} timed out`);
       err.name = 'AbortError';
       reject(err);
     }, JOB_TIMEOUT_MS);
 
-    pendingJobs.set(jobId, { resolve, reject, timer, model, messages, tools, workerId: worker.id });
+    pendingJobs.set(jobId, {
+      resolve,
+      reject,
+      timer,
+      model,
+      messages,
+      tools,
+      workerId: worker.id,
+      agentMode: meta.agentMode || null,
+      createdAt: Date.now(),
+      dispatchedAt: null,
+      cancelled: false,
+    });
 
     // Dispatch immediately to a waiting poller, or it will be picked up on next poll
     dispatchToWorker(worker, jobId);
@@ -210,11 +221,13 @@ function dispatchToWorker(worker, jobId) {
   while (worker.waiters.length > 0) {
     const waiter = worker.waiters.shift();
     if (!waiter.timedOut) {
+      job.dispatchedAt = Date.now();
       const jobPayload = {
         id: jobId,
         model: job.model,
         messages: job.messages,
         maxThreads: worker.capacity.maxThreads,
+        agentMode: job.agentMode,
       };
       if (job.tools) jobPayload.tools = job.tools;
       waiter.sendJob(jobPayload);
@@ -241,11 +254,13 @@ function pollForJob(workerId, res) {
   for (const [jobId, job] of pendingJobs) {
     if (job.workerId === workerId) {
       console.log(`[poll] delivering queued job=${jobId} to worker=${worker.name}`);
+      job.dispatchedAt = Date.now();
       const jobPayload = {
         id: jobId,
         model: job.model,
         messages: job.messages,
         maxThreads: worker.capacity.maxThreads,
+        agentMode: job.agentMode,
       };
       if (job.tools) jobPayload.tools = job.tools;
       res.json({ job: jobPayload });
@@ -310,6 +325,17 @@ function submitJobResult(jobId, result, error) {
   return true;
 }
 
+function cancelJob(jobId) {
+  const job = pendingJobs.get(jobId);
+  if (!job) return false;
+  clearTimeout(job.timer);
+  pendingJobs.delete(jobId);
+  const err = new Error('Job cancelled by client');
+  err.name = 'AbortError';
+  job.reject(err);
+  return true;
+}
+
 module.exports = {
   registerWorker,
   deregisterWorker,
@@ -322,6 +348,7 @@ module.exports = {
   sendPromptToWorker,
   pollForJob,
   submitJobResult,
+  cancelJob,
   addChunkListener,
   removeChunkListener,
   emitChunk,

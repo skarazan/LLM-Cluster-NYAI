@@ -3,11 +3,11 @@
 const express = require('express');
 const router  = express.Router();
 const { randomUUID } = require('crypto');
-const { pickWorker, incInflight, decInflight, sendPromptToWorker, addChunkListener, removeChunkListener } = require('../services/workerService');
+const { pickWorker, incInflight, decInflight, sendPromptToWorker, addChunkListener, removeChunkListener, cancelJob } = require('../services/workerService');
 
 // POST /chat — smart worker selection with retry/failover (max 3 attempts)
 router.post('/', async (req, res) => {
-  const { messages, model = 'llama3', tools } = req.body;
+  const { messages, model = 'llama3', tools, requestId, agentMode } = req.body;
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Missing required field: messages (must be a non-empty array)' });
@@ -30,20 +30,20 @@ router.post('/', async (req, res) => {
     const t0 = Date.now();
     let result = null;
 
-    const jobId = randomUUID();
+    const jobId = requestId || randomUUID();
     addChunkListener(jobId, (content) => {
       try { res.write(JSON.stringify({ chunk: content }) + '\n'); } catch {}
     });
 
     try {
-      result = await sendPromptToWorker(worker, messages, model, tools, jobId);
+      result = await sendPromptToWorker(worker, messages, model, tools, jobId, { agentMode });
     } catch (err) {
       removeChunkListener(jobId);
       decInflight(worker.id);
       console.log(`[chat] worker=${worker.name} error=${err.name}: ${err.message}`);
       if (err.name === 'AbortError') {
         clearInterval(keepalive);
-        res.end(JSON.stringify({ error: `Worker ${worker.name} timed out` }));
+        res.status(504).end(JSON.stringify({ error: err.message || `Worker ${worker.name} timed out` }));
         return;
       }
       tried.add(worker.id);
@@ -69,9 +69,16 @@ router.post('/', async (req, res) => {
 
   clearInterval(keepalive);
   if (tried.size === 0) {
-    return res.end(JSON.stringify({ error: 'No workers online' }));
+    return res.status(503).end(JSON.stringify({ error: 'No workers online' }));
   }
-  return res.end(JSON.stringify({ error: 'All workers failed', tried: [...tried] }));
+  return res.status(502).end(JSON.stringify({ error: 'All workers failed', tried: [...tried] }));
+});
+
+router.post('/cancel', (req, res) => {
+  const { requestId } = req.body || {};
+  if (!requestId) return res.status(400).json({ error: 'Missing requestId' });
+  const ok = cancelJob(requestId);
+  res.json({ ok });
 });
 
 module.exports = router;

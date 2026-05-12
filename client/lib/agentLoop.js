@@ -34,7 +34,7 @@ const TEXT_WRITE_TOOLS = new Set(['write_file', 'append_file']);
  * or null if user rejects / aborts.
  */
 async function requestPlan(opts) {
-  const { backendUrl, messages, model, workspace, chat, appendBubble, setLoading, abortRef } = opts;
+  const { backendUrl, messages, model, workspace, chat, appendBubble, setLoading, abortRef, requestId } = opts;
 
   const userTask = messages[messages.length - 1]?.content || '';
   const planMessages = [
@@ -47,7 +47,7 @@ Create a concise, numbered plan for the task below. List each file to create/mod
   ];
 
   setLoading(true);
-  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: planMessages, model });
+  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: planMessages, model, agentMode: 'code', requestId });
   setLoading(false);
 
   if (abortRef.aborted || !r.ok) return null;
@@ -133,7 +133,7 @@ async function runAgentTurn(opts) {
     backendUrl, messages, model, tools,
     workspace, approvalMode, planMode,
     chat, appendBubble, appendActivity, updateTodoView, setLoading,
-    abortRef, remembered, todoState,
+    abortRef, remembered, todoState, requestId,
   } = opts;
   const addActivity = (activity) => {
     if (typeof appendActivity === 'function') return appendActivity(activity);
@@ -174,7 +174,7 @@ async function runAgentTurn(opts) {
   }).map(t => t.function?.name || t.name).join(', ');
   const systemMsg = {
     role: 'system',
-    content: `You are a coding assistant with filesystem tools. Tool calls: ${toolCallNames}. File writing: use <write_file> and <append_file> XML tags (see rules below).
+    content: `You are LLM Cluster Code Agent. The app state is the source of truth; your memory may be incomplete after compression. Tool calls: ${toolCallNames}. File writing: use <write_file> and <append_file> XML tags (see rules below).
 
 WORKSPACE = "${workspace}"
 
@@ -199,17 +199,19 @@ FILE WRITING — use XML tags, NOT tool calls:
 - You can use double quotes freely inside the tags.
 - Do NOT use write_file or append_file as tool calls — ONLY as XML tags in your response text.
 - NEVER use run_shell to write files (no cat >, echo >, heredoc, tee, etc). ONLY <write_file> tags.
-- Use edit_file tool call for modifying existing files (small targeted changes only).
+- Use edit_file for small exact replacements.
+- Use replace_file_range after read_file when exact-string editing is brittle.
 - NEVER output placeholder paths like "/file", "path/to/file", or "/absolute/path/to/file". Use the actual absolute target path.
 
 WORKFLOW RULES:
-0. You are an AUTONOMOUS agent. Complete the ENTIRE task without stopping to ask the user. NEVER ask "what would you like me to do next" or "should I continue". Just keep working until everything is done.
-1. ALWAYS use <write_file> tags to create files and edit_file tool for modifications. NEVER show file contents in chat as markdown or code blocks.
-2. When asked to create multiple files, use <write_file> for EACH file one by one until ALL are created. Do NOT stop partway through.
-3. After each tool result, immediately call the next tool needed. Do NOT summarize progress or ask for confirmation — just continue.
-4. Do not create fake commands and do not forget slashes between files in directories.
-5. When the task is fully complete, say "Done." with a brief summary of what was created/modified. This is the ONLY time you should stop.
-6. Do NOT re-read files you have already read. Do NOT repeat tool calls.
+0. Complete the ENTIRE task without asking the user to continue.
+1. Pick exactly one next action: inspect, write, edit, run, verify, or final.
+2. Work on the first pending/failed todo. Do not create duplicate project folders.
+3. Do not narrate progress only. If work remains, emit a tool call or complete file block.
+4. NEVER show file contents in chat as markdown/code fences; use file blocks or tools.
+5. After file creation/editing, verify locally with suitable commands when possible.
+6. Say "Done." only when every todo is done and verification passes or is impossible with a stated reason.
+7. Do not repeat successful completed operations. Re-read only when needed to edit or verify current file state.
 ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : ''}
 ${formatTodoListForPrompt(taskTodos)}
 `,
@@ -263,8 +265,8 @@ ${formatTodoListForPrompt(taskTodos)}
     }, 0);
   }
 
-  const MAX_CTX_TOKENS = 12000;
-  const COMPRESS_THRESHOLD = 10000;
+  const MAX_CTX_TOKENS = 24000;
+  const COMPRESS_THRESHOLD = 20000;
   let lastCompressedAt = 0;
 
   // Compress old history into a summary via the model
@@ -396,7 +398,14 @@ ${formatTodoListForPrompt(taskTodos)}
       taskTodos,
     );
     setLoading(true);
-    const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: outgoingMessages, model, tools: filteredTools });
+    const r = await ipcRenderer.invoke('send-prompt', {
+      backendUrl,
+      messages: outgoingMessages,
+      model,
+      tools: filteredTools,
+      requestId,
+      agentMode: 'code',
+    });
     setLoading(false);
 
     // Remove stream bubble now that we have the final response
@@ -725,11 +734,12 @@ ${formatTodoListForPrompt(taskTodos)}
             break;
           }
         } else {
-          if (['edit_file', 'create_dir'].includes(toolName) && args.path) markTodoDone(taskTodos, args.path);
+          if (['edit_file', 'replace_file_range', 'create_dir'].includes(toolName) && args.path) markTodoDone(taskTodos, args.path);
           if (toolName === 'edit_file') markRelatedTodosDone(taskTodos, args.path, args.new_string || '');
+          if (toolName === 'replace_file_range') markRelatedTodosDone(taskTodos, args.path, args.content || '');
           refreshTodoView();
           // Show a brief success confirmation for write/shell tools
-          const visibleTools = ['write_file', 'append_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell', 'read_file', 'list_dir', 'grep', 'glob'];
+          const visibleTools = ['write_file', 'append_file', 'edit_file', 'replace_file_range', 'create_dir', 'delete_file', 'run_shell', 'read_file', 'list_dir', 'grep', 'glob'];
           if (visibleTools.includes(toolName)) {
             addActivity({
               kind: activityKindForTool(toolName),
@@ -1135,11 +1145,17 @@ function formatTodoListForDisplay(todos) {
 function injectTodoStatus(messages, todos) {
   const note = formatTodoListForPrompt(todos);
   if (!note) return messages;
+  const done = todos
+    .filter(todo => todo.status === 'done')
+    .slice(-12)
+    .map(todo => `- ${todo.title}${todo.path ? ` (${todo.path})` : ''}`)
+    .join('\n');
+  const completed = done ? `\nCOMPLETED OPS - do not repeat these:\n${done}\n` : '';
   return [
     ...messages,
     {
       role: 'user',
-      content: `${note}\nUse this todo list as state. Work on the first pending/failed item next. Do not say Done until every todo is [done].`,
+      content: `${note}${completed}\nUse this todo list as state. Work on the first pending/failed item next. Do not say Done until every todo is [done].`,
     },
   ];
 }
@@ -1172,6 +1188,7 @@ function previewText(text, maxLines = 80, maxChars = 6000) {
 
 function activityKindForTool(toolName) {
   if (toolName === 'edit_file') return 'edit';
+  if (toolName === 'replace_file_range') return 'edit';
   if (['write_file', 'append_file', 'create_dir', 'delete_file'].includes(toolName)) return 'write';
   if (['read_file', 'list_dir', 'grep', 'glob'].includes(toolName)) return 'read';
   if (toolName === 'run_shell') return 'shell';
@@ -1180,6 +1197,7 @@ function activityKindForTool(toolName) {
 
 function activityTitleForTool(toolName, args, toolResult) {
   if (toolName === 'edit_file') return `Edited ${shortPath(args.path)}`;
+  if (toolName === 'replace_file_range') return `Edited ${shortPath(args.path)}:${args.start_line}-${args.end_line}`;
   if (toolName === 'create_dir') return `Created ${shortPath(args.path)}`;
   if (toolName === 'delete_file') return `Deleted ${shortPath(args.path)}`;
   if (toolName === 'read_file') return `Read ${shortPath(args.path)}`;
@@ -1204,6 +1222,9 @@ function buildToolActivityDetail(toolName, args, toolResult) {
     const oldLines = String(args.old_string || '').split('\n').map(l => `- ${l}`).join('\n');
     const newLines = String(args.new_string || '').split('\n').map(l => `+ ${l}`).join('\n');
     detail.diff = `${oldLines}\n${newLines}`;
+  }
+  if (toolName === 'replace_file_range') {
+    detail.diff = `@@ ${args.start_line}-${args.end_line} @@\n${String(args.content || '').split('\n').map(l => `+ ${l}`).join('\n')}`;
   }
   if (toolName === 'run_shell') {
     detail.command = [args.cmd, ...(args.args || [])].join(' ');

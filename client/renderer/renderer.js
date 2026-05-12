@@ -66,6 +66,7 @@ let abortRef      = { aborted: false };
 let remembered    = new Set(); // "toolName:pathPrefix" approved this conversation
 let latestTodoDetail = 'No active todo list yet.';
 let todoState     = { items: [] };
+let activeRequestId = null;
 
 function updateSessionTokensDisplay() {
   sessionTokensEl.textContent = `in: ${sessionTokens.prompt} · out: ${sessionTokens.response}`;
@@ -118,11 +119,14 @@ approvalSel.addEventListener('change', () => {
 
 stopBtn.addEventListener('click', () => {
   abortRef.aborted = true;
+  const requestId = activeRequestId;
+  activeRequestId = null;
   stopBtn.classList.add('hidden');
-  // sendBtn stays disabled until runAgentTurn resolves — prevents
-  // sending a second prompt while the old request is still in-flight.
-  // Show a status hint so the user knows we're waiting for the server.
-  appendBubble('error', '[Stopping… waiting for server response to complete]');
+  const backendUrl = urlInput.value.trim();
+  if (requestId && backendUrl) {
+    ipcRenderer.invoke('cancel-prompt', { backendUrl, requestId }).catch(() => {});
+  }
+  appendBubble('error', '[Stopped]');
 });
 
 // Apply stored mode on load
@@ -359,6 +363,7 @@ async function sendCode(prompt) {
   appendBubble('user', prompt);
 
   abortRef = { aborted: false };
+  activeRequestId = `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   stopBtn.classList.remove('hidden');
 
   let placeholder = appendBubble('assistant', 'thinking…');
@@ -378,6 +383,7 @@ async function sendCode(prompt) {
       workspace,
       approvalMode,
       planMode: planModeCheck.checked,
+      requestId: activeRequestId,
       chat,
       appendBubble: (...args) => { ensurePlaceholderRemoved(); return appendBubble(...args); },
       appendActivity: (activity) => { ensurePlaceholderRemoved(); return appendActivity(activity); },
@@ -400,6 +406,7 @@ async function sendCode(prompt) {
   }
 
   stopBtn.classList.add('hidden');
+  activeRequestId = null;
 }
 
 // --- Unified send ---
@@ -428,6 +435,10 @@ function newChat() {
   remembered    = new Set();
   todoState     = { items: [] };
   abortRef      = { aborted: true }; // cancel any in-flight loop
+  if (activeRequestId && urlInput.value.trim()) {
+    ipcRenderer.invoke('cancel-prompt', { backendUrl: urlInput.value.trim(), requestId: activeRequestId }).catch(() => {});
+  }
+  activeRequestId = null;
   updateSessionTokensDisplay();
   chat.innerHTML = '';
   activityPanel.classList.add('hidden');
