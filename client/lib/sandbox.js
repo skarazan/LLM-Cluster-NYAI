@@ -51,6 +51,15 @@ function resolveSafe(workspaceRoot, p) {
     return { ok: false, error: `Path "${p}" contains invalid characters.` };
   }
 
+  if (typeof p === 'string' && !path.isAbsolute(p)) {
+    const workspaceBase = path.basename(workspaceRoot);
+    const compactBase = workspaceBase.replace(/\s+/g, '');
+    const firstPart = p.split(/[\\/]/)[0];
+    if (firstPart === workspaceBase || firstPart === compactBase || firstPart === workspaceBase.split(/\s+/).at(-1)) {
+      p = p.split(/[\\/]/).slice(1).join(path.sep) || '.';
+    }
+  }
+
   // Common model slip: "/workspacefile.js" instead of "/workspace/file.js".
   if (typeof p === 'string' && path.isAbsolute(p) && p.startsWith(workspaceRoot) && !p.startsWith(workspaceRoot + path.sep) && p !== workspaceRoot) {
     p = path.join(workspaceRoot, p.slice(workspaceRoot.length));

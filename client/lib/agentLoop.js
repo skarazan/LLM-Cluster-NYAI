@@ -132,15 +132,15 @@ async function runAgentTurn(opts) {
   const {
     backendUrl, messages, model, tools,
     workspace, approvalMode, planMode,
-    chat, appendBubble, appendActivity, updateLedgerView, setLoading,
-    abortRef, remembered,
+    chat, appendBubble, appendActivity, updateTodoView, setLoading,
+    abortRef, remembered, todoState,
   } = opts;
   const addActivity = (activity) => {
     if (typeof appendActivity === 'function') return appendActivity(activity);
     return appendBubble(activity.status === 'error' ? 'error' : 'assistant', activity.title || activity.subtitle || 'Activity');
   };
-  const refreshLedgerView = () => {
-    if (typeof updateLedgerView === 'function') updateLedgerView(formatLedgerForDisplay(taskLedger));
+  const refreshTodoView = () => {
+    if (typeof updateTodoView === 'function') updateTodoView(formatTodoListForDisplay(taskTodos));
   };
 
   // ── Plan Phase (only when toggled on) ───────────────────────────────
@@ -166,7 +166,7 @@ async function runAgentTurn(opts) {
 
   // ── Execution Phase ─────────────────────────────────────────────────
   let history = [...messages];
-  const taskLedger = createTaskLedger(messages, approvedPlan, workspace);
+  const taskTodos = mergeTodoState(todoState, createTaskTodoList(messages, approvedPlan, workspace));
   const failureFingerprints = new Map();
   const toolCallNames = tools.filter(t => {
     const n = t.function?.name || t.name;
@@ -211,7 +211,7 @@ WORKFLOW RULES:
 5. When the task is fully complete, say "Done." with a brief summary of what was created/modified. This is the ONLY time you should stop.
 6. Do NOT re-read files you have already read. Do NOT repeat tool calls.
 ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : ''}
-${formatLedgerForPrompt(taskLedger)}
+${formatTodoListForPrompt(taskTodos)}
 `,
   };
   if (history.length > 0 && history[0].role === 'system') {
@@ -219,7 +219,7 @@ ${formatLedgerForPrompt(taskLedger)}
   } else {
     history = [systemMsg, ...history];
   }
-  refreshLedgerView();
+  refreshTodoView();
 
   let toolCallCount = 0;
   let overflowRetries = 0;
@@ -391,9 +391,9 @@ ${formatLedgerForPrompt(taskLedger)}
       const name = t.function?.name || t.name;
       return !TEXT_WRITE_TOOLS.has(name);
     });
-    const outgoingMessages = injectLedgerStatus(
+    const outgoingMessages = injectTodoStatus(
       sanitizeHistoryForTools(await trimHistory(history), filteredTools),
-      taskLedger,
+      taskTodos,
     );
     setLoading(true);
     const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: outgoingMessages, model, tools: filteredTools });
@@ -427,10 +427,10 @@ ${formatLedgerForPrompt(taskLedger)}
     if (data.response) {
       const writeBlocks = extractTextWriteBlocks(data.response, history);
       for (let block of writeBlocks) {
-        const normalized = normalizeTextWriteBlockPath(block, taskLedger, workspace);
+        const normalized = normalizeTextWriteBlockPath(block, taskTodos, workspace);
         if (!normalized.ok) {
-          markLedgerFailed(taskLedger, block.path, normalized.error);
-          refreshLedgerView();
+          markTodoFailed(taskTodos, block.path, normalized.error);
+          refreshTodoView();
           addActivity({
             kind: 'write',
             status: 'error',
@@ -440,15 +440,16 @@ ${formatLedgerForPrompt(taskLedger)}
           });
           history.push({
             role: 'user',
-            content: `${normalized.error}\nUse an exact absolute path under "${workspace}". Pending files are: ${getPendingFiles(taskLedger).join(', ') || '(none known)'}.`,
+            content: `${normalized.error}\nUse an exact absolute path under "${workspace}". Pending todos are:\n${formatTodoListForPrompt(taskTodos)}`,
           });
           continue;
         }
         block = normalized.block;
         const result = await executeTextWriteBlock(block, workspace);
         if (result.ok) {
-          markLedgerWritten(taskLedger, block.path);
-          refreshLedgerView();
+          markTodoDone(taskTodos, block.path);
+          markRelatedTodosDone(taskTodos, block.path, block.content);
+          refreshTodoView();
           const parts = result.chunks > 1 ? ` (${result.lines} lines, auto-chunked ${result.chunks} parts)` : '';
           addActivity({
             kind: 'write',
@@ -467,8 +468,8 @@ ${formatLedgerForPrompt(taskLedger)}
           });
           toolCallCount++;
         } else {
-          markLedgerFailed(taskLedger, block.path, result.error);
-          refreshLedgerView();
+          markTodoFailed(taskTodos, block.path, result.error);
+          refreshTodoView();
           addActivity({
             kind: 'write',
             status: 'error',
@@ -561,20 +562,20 @@ ${formatLedgerForPrompt(taskLedger)}
       const respNorm = rawResp.toLowerCase().trim();
       const resp = meaningless.has(respNorm) ? '' : rawResp;
 
-      if (isPrematureDone(resp, taskLedger)) {
+      if (isPrematureDone(resp, taskTodos)) {
         history.push({ role: 'assistant', content: resp });
         history.push({
           role: 'user',
-          content: `You said Done, but the task ledger still has unfinished work:\n${formatLedgerForPrompt(taskLedger)}\nContinue now. Emit the next tool call or complete file block. Do not say Done until pending and failed files are resolved.`,
+          content: `You said Done, but the todo list still has unfinished work:\n${formatTodoListForPrompt(taskTodos)}\nContinue now. Emit the next tool call or complete file block. Do not say Done until pending and failed todos are resolved.`,
         });
         continue;
       }
 
       if (resp && /\bdone\b|completed|finished|all set/i.test(resp)) {
-        const verification = await verifyLedgerFiles(taskLedger, workspace);
+        const verification = await verifyTodoFiles(taskTodos, workspace);
         if (!verification.ok) {
-          for (const item of verification.failed) markLedgerFailed(taskLedger, item.path, item.error);
-          refreshLedgerView();
+          for (const item of verification.failed) markTodoFailed(taskTodos, item.path, item.error);
+          refreshTodoView();
           history.push({ role: 'assistant', content: resp });
           history.push({
             role: 'user',
@@ -620,6 +621,7 @@ ${formatLedgerForPrompt(taskLedger)}
       history.push({ role: 'assistant', content: displayResp });
       if (pendingThinkText) appendThinkingBlock(chat, pendingThinkText);
       ipcRenderer.removeListener('stream-chunk', onStreamChunk);
+      if (todoState) todoState.items = taskTodos;
       // Strip the injected system message before returning — renderer stores clean history
       return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant')));
     }
@@ -709,8 +711,8 @@ ${formatLedgerForPrompt(taskLedger)}
 
         // Surface errors visibly so the user can see what went wrong
         if (!toolResult.ok) {
-          if (args.path) markLedgerFailed(taskLedger, args.path, toolResult.error);
-          refreshLedgerView();
+          if (args.path) markTodoFailed(taskTodos, args.path, toolResult.error);
+          refreshTodoView();
           addActivity({
             kind: activityKindForTool(toolName),
             status: 'error',
@@ -723,8 +725,9 @@ ${formatLedgerForPrompt(taskLedger)}
             break;
           }
         } else {
-          if (['edit_file', 'create_dir'].includes(toolName) && args.path) markLedgerWritten(taskLedger, args.path);
-          refreshLedgerView();
+          if (['edit_file', 'create_dir'].includes(toolName) && args.path) markTodoDone(taskTodos, args.path);
+          if (toolName === 'edit_file') markRelatedTodosDone(taskTodos, args.path, args.new_string || '');
+          refreshTodoView();
           // Show a brief success confirmation for write/shell tools
           const visibleTools = ['write_file', 'append_file', 'edit_file', 'create_dir', 'delete_file', 'run_shell', 'read_file', 'list_dir', 'grep', 'glob'];
           if (visibleTools.includes(toolName)) {
@@ -748,6 +751,7 @@ ${formatLedgerForPrompt(taskLedger)}
   }
 
   ipcRenderer.removeListener('stream-chunk', onStreamChunk);
+  if (todoState) todoState.items = taskTodos;
   return history;
 }
 
@@ -949,31 +953,130 @@ function looksLikeSourcePath(pathLike) {
   return /\.(html?|css|js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|json|yaml|yml|md|txt|sh|env|toml|xml|svg)$/i.test(pathLike);
 }
 
-function createTaskLedger(messages, approvedPlan, workspace) {
+function createTaskTodoList(messages, approvedPlan, workspace) {
   const source = [approvedPlan, messages.map(m => m.content || '').join('\n')].filter(Boolean).join('\n');
-  const plannedFiles = new Set();
+  const todos = [];
+  const seen = new Set();
+
+  const planLines = String(approvedPlan || '')
+    .split('\n')
+    .map(line => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim())
+    .filter(line => line.length > 8);
+
+  for (const line of planLines) addTodo(todos, seen, line, extractFirstPath(line, workspace));
+
   const pathRe = /(?:^|[\s"'`(])((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))/gi;
   for (const match of source.matchAll(pathRe)) {
-    let p = match[1].replace(/[.,;:]+$/, '');
-    if (workspace && !p.startsWith('/') && !/^[A-Za-z]:\\/.test(p)) p = `${workspace}/${p.replace(/^\.?\//, '')}`;
-    plannedFiles.add(p);
+    const filePath = normalizeTodoPath(match[1].replace(/[.,;:]+$/, ''), workspace);
+    addTodo(todos, seen, `Create or update ${shortPath(filePath)}`, filePath);
   }
-  return {
-    plannedFiles,
-    writtenFiles: new Set(),
-    failedFiles: new Map(),
-  };
+
+  if (/tailwind/i.test(source) && !todos.some(t => /tailwind/i.test(t.title) || /tailwind/i.test(t.path || ''))) {
+    addTodo(todos, seen, 'Configure Tailwind CSS styling', null);
+  }
+  if (/css|style/i.test(source) && !todos.some(t => /\.css$/i.test(t.path || '') || /css|style/i.test(t.title))) {
+    addTodo(todos, seen, 'Create or update CSS styling', `${workspace}/style.css`);
+  }
+
+  return todos;
 }
 
-function markLedgerWritten(ledger, path) {
-  if (!path) return;
-  ledger.writtenFiles.add(path);
-  ledger.failedFiles.delete(path);
+function mergeTodoState(todoState, freshTodos) {
+  const existing = Array.isArray(todoState?.items) ? todoState.items : [];
+  if (existing.length === 0) {
+    if (todoState) todoState.items = freshTodos;
+    return freshTodos;
+  }
+
+  const merged = existing.map(todo => ({ ...todo }));
+  const seen = new Set(merged.map(todo => todo.path || todo.title.toLowerCase()));
+  for (const todo of freshTodos) {
+    const key = todo.path || todo.title.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push({ ...todo, id: merged.length + 1 });
+    }
+  }
+  if (todoState) todoState.items = merged;
+  return merged;
 }
 
-function markLedgerFailed(ledger, path, error) {
-  if (!path) return;
-  ledger.failedFiles.set(path, error || 'unknown error');
+function addTodo(todos, seen, title, path) {
+  const key = path || title.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  todos.push({ id: todos.length + 1, title, path, status: 'pending', error: '' });
+}
+
+function extractFirstPath(text, workspace) {
+  const match = String(text || '').match(/((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))/i);
+  return match ? normalizeTodoPath(match[1].replace(/[.,;:]+$/, ''), workspace) : null;
+}
+
+function normalizeTodoPath(path, workspace) {
+  let p = String(path || '').trim();
+  if (workspace && p && !p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p)) {
+    p = stripWorkspaceEchoPrefix(p, workspace);
+  }
+  if (workspace && p && !p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p)) p = `${workspace}/${p.replace(/^\.?\//, '')}`;
+  return p;
+}
+
+function stripWorkspaceEchoPrefix(relativePath, workspace) {
+  const workspaceBase = String(workspace || '').split(/[\\/]/).filter(Boolean).at(-1) || '';
+  const compactBase = workspaceBase.replace(/\s+/g, '');
+  const parts = String(relativePath || '').split(/[\\/]/).filter(Boolean);
+  if (parts.length === 0) return relativePath;
+  if (parts[0] === workspaceBase || parts[0] === compactBase || parts[0] === workspaceBase.split(/\s+/).at(-1)) {
+    return parts.slice(1).join('/');
+  }
+  return relativePath;
+}
+
+function markTodoDone(todos, pathOrTitle) {
+  const todo = findTodoForTarget(todos, pathOrTitle);
+  if (!todo) return;
+  todo.status = 'done';
+  todo.error = '';
+}
+
+function markTodoFailed(todos, pathOrTitle, error) {
+  const todo = findTodoForTarget(todos, pathOrTitle) || addAdHocTodo(todos, pathOrTitle);
+  todo.status = 'failed';
+  todo.error = error || 'unknown error';
+}
+
+function markRelatedTodosDone(todos, path, content) {
+  const haystack = `${path || ''}\n${content || ''}`;
+  for (const todo of todos) {
+    if (todo.status === 'done') continue;
+    const title = todo.title.toLowerCase();
+    if (/tailwind/i.test(title) && /tailwind|cdn\.tailwindcss|@tailwind/i.test(haystack)) {
+      todo.status = 'done';
+      todo.error = '';
+    }
+    if (/(css|style|styling)/i.test(title) && (/\.css$/i.test(path || '') || /<style|stylesheet|class=/i.test(haystack))) {
+      todo.status = 'done';
+      todo.error = '';
+    }
+  }
+}
+
+function addAdHocTodo(todos, target) {
+  const todo = { id: todos.length + 1, title: `Resolve ${target || 'failed action'}`, path: target || null, status: 'pending', error: '' };
+  todos.push(todo);
+  return todo;
+}
+
+function findTodoForTarget(todos, target) {
+  const t = String(target || '');
+  return todos.find(todo =>
+    todo.path === t ||
+    (todo.path && shortPath(todo.path) === shortPath(t)) ||
+    (!todo.path && t && todo.title.toLowerCase().includes(shortPath(t).toLowerCase())) ||
+    (/tailwind/i.test(todo.title) && /tailwind/i.test(t)) ||
+    (!todo.path && /(css|style|styling)/i.test(todo.title) && /\.css$/i.test(t))
+  );
 }
 
 function isPlaceholderPath(path, workspace) {
@@ -985,75 +1088,65 @@ function isPlaceholderPath(path, workspace) {
   return false;
 }
 
-function normalizeTextWriteBlockPath(block, ledger, workspace) {
+function normalizeTextWriteBlockPath(block, todos, workspace) {
   let path = String(block.path || '').trim();
   if (isPlaceholderPath(path, workspace)) {
-    const pending = getPendingFiles(ledger);
-    const replacement = pending.find(p => looksLikeSourcePath(p));
+    const pending = getPendingTodos(todos);
+    const replacement = pending.map(t => t.path).find(p => p && looksLikeSourcePath(p));
     if (!replacement) {
       return {
         ok: false,
-        error: `The model used placeholder path "${path}". No pending planned file was available to safely map it to.`,
+        error: `The model used placeholder path "${path}". No pending todo with a concrete file path was available to safely map it to.`,
       };
     }
     return { ok: true, block: { ...block, path: replacement } };
   }
 
   if (workspace && !path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path)) {
-    path = `${workspace}/${path.replace(/^\.?\//, '')}`;
+    path = `${workspace}/${stripWorkspaceEchoPrefix(path.replace(/^\.?\//, ''), workspace)}`;
   }
   return { ok: true, block: { ...block, path } };
 }
 
-function getPendingFiles(ledger) {
-  return [...ledger.plannedFiles].filter(p => !ledger.writtenFiles.has(p));
+function getPendingTodos(todos) {
+  return todos.filter(todo => todo.status !== 'done');
 }
 
-function formatLedgerForPrompt(ledger) {
-  const planned = [...ledger.plannedFiles];
-  const pending = getPendingFiles(ledger);
-  const failed = [...ledger.failedFiles.entries()];
-  if (planned.length === 0 && failed.length === 0) return '';
-  return `\nTASK LEDGER:\n- Planned files: ${planned.length ? planned.join(', ') : '(none detected)'}\n- Written files: ${[...ledger.writtenFiles].join(', ') || '(none yet)'}\n- Pending files: ${pending.join(', ') || '(none)'}\n- Failed files: ${failed.map(([p, e]) => `${p} (${e})`).join(', ') || '(none)'}\n`;
+function formatTodoListForPrompt(todos) {
+  if (!todos.length) return '';
+  const visible = todos
+    .filter(todo => todo.status !== 'done')
+    .slice(0, 8)
+    .map(todo => `${todo.id}. [${todo.status}] ${todo.title}${todo.path ? ` (${todo.path})` : ''}${todo.error ? ` — ${todo.error}` : ''}`);
+  if (!visible.length) return '\nTODO LIST: all items done.\n';
+  return `\nTODO LIST - finish these before saying Done:\n${visible.join('\n')}\n`;
 }
 
-function formatLedgerForDisplay(ledger) {
-  const planned = [...ledger.plannedFiles];
-  const written = [...ledger.writtenFiles];
-  const pending = getPendingFiles(ledger);
-  const failed = [...ledger.failedFiles.entries()];
+function formatTodoListForDisplay(todos) {
   return [
-    'Task Ledger',
+    'Todo List',
     '',
-    `Planned (${planned.length})`,
-    ...(planned.length ? planned.map(p => `  - ${p}`) : ['  (none detected)']),
-    '',
-    `Written (${written.length})`,
-    ...(written.length ? written.map(p => `  - ${p}`) : ['  (none yet)']),
-    '',
-    `Pending (${pending.length})`,
-    ...(pending.length ? pending.map(p => `  - ${p}`) : ['  (none)']),
-    '',
-    `Failed (${failed.length})`,
-    ...(failed.length ? failed.map(([p, e]) => `  - ${p}: ${e}`) : ['  (none)']),
+    ...(todos.length
+      ? todos.map(todo => `${todo.id}. ${todo.status === 'done' ? '[x]' : todo.status === 'failed' ? '[!]' : '[ ]'} ${todo.title}${todo.path ? `\n   ${todo.path}` : ''}${todo.error ? `\n   Error: ${todo.error}` : ''}`)
+      : ['  (no todos detected)']),
   ].join('\n');
 }
 
-function injectLedgerStatus(messages, ledger) {
-  const note = formatLedgerForPrompt(ledger);
+function injectTodoStatus(messages, todos) {
+  const note = formatTodoListForPrompt(todos);
   if (!note) return messages;
   return [
     ...messages,
     {
       role: 'user',
-      content: `${note}\nUse this ledger as state. Resolve failed and pending files before saying Done.`,
+      content: `${note}\nUse this todo list as state. Work on the first pending/failed item next. Do not say Done until every todo is [done].`,
     },
   ];
 }
 
-function isPrematureDone(resp, ledger) {
+function isPrematureDone(resp, todos) {
   if (!resp || !/\bdone\b|completed|finished|all set/i.test(resp)) return false;
-  return getPendingFiles(ledger).length > 0 || ledger.failedFiles.size > 0;
+  return getPendingTodos(todos).length > 0;
 }
 
 function recordRepeatedFailure(failures, tool, target, error) {
@@ -1127,8 +1220,8 @@ function buildToolActivityDetail(toolName, args, toolResult) {
   return detail;
 }
 
-async function verifyLedgerFiles(ledger, workspace) {
-  const paths = [...ledger.writtenFiles, ...ledger.plannedFiles];
+async function verifyTodoFiles(todos, workspace) {
+  const paths = todos.map(todo => todo.path).filter(Boolean);
   if (paths.length === 0) return { ok: true, failed: [] };
   const uniquePaths = [...new Set(paths)];
   const r = await ipcRenderer.invoke('agent:verify-files', { paths: uniquePaths, workspace });
