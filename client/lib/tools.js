@@ -121,7 +121,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'create_dir',
-    description: 'Create a directory (and any missing parent directories). Do not call this for the workspace root or for a file path. If the directory already exists, this is a no-op and does not complete file creation.',
+    description: 'Create a directory (and any missing parent directories). NEVER call this for a filename such as script.js, style.css, index.html, README.md, or any path with a file extension. To create files, use <write_file> text blocks. If the directory already exists, this is a no-op and does not complete file creation.',
     parameters: {
       type: 'object',
       properties: {

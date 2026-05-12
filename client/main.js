@@ -16,6 +16,7 @@ const MAX_READ_LINES = 1000;
 const MAX_LIST_ENTRIES = 500;
 const MAX_SEARCH_RESULTS = 200;
 const IGNORE_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.vite', 'coverage', '.cache']);
+const FILE_LIKE_EXTENSION_RE = /\.(?:html?|css|js|mjs|cjs|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml|env)$/i;
 const activePromptControllers = new Map();
 
 // --- Update check: compare current version against latest GitHub release ---
@@ -227,11 +228,25 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         let existed = false;
         let previousBytes = 0;
         let previousContent = null;
+        let repairedDirectory = false;
         try {
           const stat = await fs.stat(check.resolved);
-          existed = stat.isFile();
-          previousBytes = stat.size;
-          if (existed) previousContent = await fs.readFile(check.resolved, 'utf8');
+          if (stat.isDirectory()) {
+            const entries = await fs.readdir(check.resolved);
+            if (entries.length > 0) {
+              return {
+                ok: false,
+                error: `Cannot write file because a non-empty directory exists at ${check.resolved}. Choose the correct file path or remove that directory manually.`,
+                pathIsDirectory: true,
+              };
+            }
+            await fs.rmdir(check.resolved);
+            repairedDirectory = true;
+          } else {
+            existed = stat.isFile();
+            previousBytes = stat.size;
+            if (existed) previousContent = await fs.readFile(check.resolved, 'utf8');
+          }
         } catch {
           existed = false;
         }
@@ -246,6 +261,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
           previousBytes,
           bytes,
           unchanged,
+          repairedDirectory,
         };
       }
 
@@ -259,10 +275,24 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         if (!check.ok) return { ok: false, error: check.error };
         let existed = false;
         let previousBytes = 0;
+        let repairedDirectory = false;
         try {
           const stat = await fs.stat(check.resolved);
-          existed = stat.isFile();
-          previousBytes = stat.size;
+          if (stat.isDirectory()) {
+            const entries = await fs.readdir(check.resolved);
+            if (entries.length > 0) {
+              return {
+                ok: false,
+                error: `Cannot append to file because a non-empty directory exists at ${check.resolved}. Choose the correct file path or remove that directory manually.`,
+                pathIsDirectory: true,
+              };
+            }
+            await fs.rmdir(check.resolved);
+            repairedDirectory = true;
+          } else {
+            existed = stat.isFile();
+            previousBytes = stat.size;
+          }
         } catch {
           existed = false;
         }
@@ -274,6 +304,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
           alreadyExists: existed,
           previousBytes,
           bytes: previousBytes + Buffer.byteLength(String(args.content), 'utf8'),
+          repairedDirectory,
         };
       }
 
@@ -311,6 +342,13 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
       case 'create_dir': {
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
+        if (FILE_LIKE_EXTENSION_RE.test(path.basename(check.resolved))) {
+          return {
+            ok: false,
+            error: `create_dir was called with a file-looking path (${args.path}). Use <write_file path="${args.path}">...</write_file> to create the file instead.`,
+            pathLooksLikeFile: true,
+          };
+        }
         let existed = false;
         try {
           existed = (await fs.stat(check.resolved)).isDirectory();

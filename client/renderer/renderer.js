@@ -234,6 +234,7 @@ function formatActivityDetail(detail) {
   if (detail.chunks != null) lines.push(`Chunks: ${detail.chunks}`);
   if (detail.alreadyExists != null) lines.push(`Already existed: ${detail.alreadyExists ? 'yes' : 'no'}`);
   if (detail.unchanged != null) lines.push(`Changed content: ${detail.unchanged ? 'no' : 'yes'}`);
+  if (detail.repairedDirectory != null) lines.push(`Repaired file-path directory: ${detail.repairedDirectory ? 'yes' : 'no'}`);
   if (detail.previousBytes != null) lines.push(`Previous bytes: ${detail.previousBytes}`);
   if (detail.bytes != null) lines.push(`Bytes: ${detail.bytes}`);
   if (detail.preview) lines.push(`\nPreview:\n${detail.preview}`);

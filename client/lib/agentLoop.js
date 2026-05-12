@@ -203,6 +203,7 @@ FILE WRITING — use XML tags, NOT tool calls:
 - Use edit_file for small exact replacements.
 - Use replace_file_range after read_file when exact-string editing is brittle.
 - NEVER output placeholder paths like "/file", "path/to/file", or "/absolute/path/to/file". Use the actual absolute target path.
+- NEVER call create_dir for a file path like script.js, style.css, index.html, README.md, or anything with a file extension. Use <write_file> for files.
 
 WORKFLOW RULES:
 0. Complete the ENTIRE task without asking the user to continue.
@@ -231,6 +232,7 @@ ${formatTodoListForPrompt(taskTodos)}
   let plainContinuationCount = 0;
   let incompleteWriteRetries = 0;
   let emptyContinuationCount = 0;
+  const plainResponseFingerprints = new Map();
   const successfulActionFingerprints = new Map();
 
   // Live stream bubble — shows tokens as they arrive via IPC 'stream-chunk'
@@ -628,9 +630,17 @@ ${formatTodoListForPrompt(taskTodos)}
       }
 
       if (resp && shouldContinueAfterPlainResponse(resp, toolCallCount, plainContinuationCount, taskTodos)) {
+        const repeatedPlain = recordPlainResponse(plainResponseFingerprints, resp);
         plainContinuationCount++;
         appendBubble('assistant', resp, meta);
         history.push({ role: 'assistant', content: resp });
+        if (repeatedPlain >= 2) {
+          history.push({
+            role: 'user',
+            content: buildRepeatedPlainNudge(resp, taskTodos, workspace),
+          });
+          continue;
+        }
         history.push({
           role: 'user',
           content: buildContinuationNudge(taskTodos, workspace),
@@ -868,6 +878,7 @@ async function executeTextWriteBlock(block, workspace) {
     alreadyExists: firstResult.alreadyExists,
     previousBytes: firstResult.previousBytes,
     unchanged: firstResult.unchanged,
+    repairedDirectory: firstResult.repairedDirectory,
   };
 }
 
@@ -1313,6 +1324,7 @@ function buildToolActivityDetail(toolName, args, toolResult) {
   };
   if (toolResult.alreadyExists != null) detail.alreadyExists = Boolean(toolResult.alreadyExists);
   if (toolResult.unchanged != null) detail.unchanged = Boolean(toolResult.unchanged);
+  if (toolResult.repairedDirectory != null) detail.repairedDirectory = Boolean(toolResult.repairedDirectory);
   if (toolResult.previousBytes != null) detail.previousBytes = toolResult.previousBytes;
   if (toolResult.bytes != null) detail.bytes = toolResult.bytes;
   if (toolName === 'edit_file') {
@@ -1375,6 +1387,13 @@ function shouldContinueAfterPlainResponse(text, toolCallCount, continuationCount
   return progressOnlyPatterns.some(pattern => pattern.test(normalized));
 }
 
+function recordPlainResponse(responses, text) {
+  const key = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 500);
+  const count = (responses.get(key) || 0) + 1;
+  responses.set(key, count);
+  return count;
+}
+
 function buildContinuationNudge(todos, workspace) {
   const first = getPendingTodos(todos)[0];
   const target = first
@@ -1385,6 +1404,20 @@ Do not narrate progress only. Emit exactly one useful next action:
 - a tool call to inspect/edit/run/verify, or
 - a complete <write_file>/<append_file> block under "${workspace}", or
 - "Done." only if every todo is complete and verification passes.`;
+}
+
+function buildRepeatedPlainNudge(text, todos, workspace) {
+  const first = getPendingTodos(todos)[0];
+  const target = first?.path || '';
+  const directoryFileHint = /directory.+instead of a file|cannot delete|remove the directory/i.test(text)
+    ? `\nIf a directory exists where a file should be, do not delete it with delete_file and do not narrate. Emit the exact <write_file> block for the target file; the client can repair an empty accidental directory at that path.`
+    : '';
+  return `You repeated the same progress-only message without doing work. Stop narrating and perform the next concrete action now.${directoryFileHint}
+First unfinished todo: ${first ? `${first.title}${target ? ` (${target})` : ''}` : 'unknown'}
+Valid next output:
+- a complete <write_file path="${target || `${workspace}/filename.ext`}">...</write_file> block, or
+- a necessary read/list/edit/run tool call.
+Do not call create_dir for filenames with extensions. Do not say Done.`;
 }
 
 function isTruncatedFinish(reason) {
