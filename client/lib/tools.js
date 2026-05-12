@@ -203,7 +203,7 @@ const TOOL_DEFINITIONS = [
  * always knows the exact path to use without guessing.
  */
 function getToolSchemas(workspace) {
-  return TOOL_DEFINITIONS.map(({ name, description, parameters }) => {
+  return TOOL_DEFINITIONS.filter(({ name }) => name !== 'create_dir').map(({ name, description, parameters }) => {
     let desc = description;
     if (workspace) {
       // Patch path/root descriptions to include the actual workspace root

@@ -185,6 +185,23 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   const messages = wrapMessages(job.messages, job.tools);
   const startMs = Date.now();
   const isCodeAgent = job.agentMode === 'code';
+  const sampling = {
+    temperature: isCodeAgent
+      ? Number(process.env.LLM_CODE_TEMPERATURE || 0.35)
+      : Number(process.env.LLM_CHAT_TEMPERATURE || 0.65),
+    topP: isCodeAgent
+      ? Number(process.env.LLM_CODE_TOP_P || 0.9)
+      : Number(process.env.LLM_CHAT_TOP_P || 0.9),
+    topK: isCodeAgent
+      ? Number(process.env.LLM_CODE_TOP_K || 30)
+      : Number(process.env.LLM_CHAT_TOP_K || 40),
+    presencePenalty: isCodeAgent
+      ? Number(process.env.LLM_CODE_PRESENCE_PENALTY || 0.4)
+      : Number(process.env.LLM_CHAT_PRESENCE_PENALTY || 0.2),
+    repeatPenalty: isCodeAgent
+      ? Number(process.env.LLM_CODE_REPEAT_PENALTY || 1.15)
+      : Number(process.env.LLM_CHAT_REPEAT_PENALTY || 1.1),
+  };
 
   // ── Debug: audit the message array being sent ──────────────────────
   const msgSummary = messages.map((m, i) => {
@@ -211,10 +228,12 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       stream: true,
       stream_options: { include_usage: true },
       max_tokens: maxTokens,
-      temperature: isCodeAgent ? Number(process.env.LLM_CODE_TEMPERATURE || 0.25) : 0.7,
-      top_p: isCodeAgent ? Number(process.env.LLM_CODE_TOP_P || 0.9) : 0.95,
-      presence_penalty: 0,
+      temperature: sampling.temperature,
+      top_p: sampling.topP,
+      top_k: sampling.topK,
+      presence_penalty: sampling.presencePenalty,
       frequency_penalty: 0,
+      repeat_penalty: sampling.repeatPenalty,
       cache_prompt: process.env.LLM_CACHE_PROMPT === '1',
     };
     if (hasTools) {
@@ -236,9 +255,11 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       options: {
         num_thread: maxThreads,
         num_ctx: numCtx,
-        temperature: isCodeAgent ? Number(process.env.LLM_CODE_TEMPERATURE || 0.25) : 0.7,
-        top_p: isCodeAgent ? Number(process.env.LLM_CODE_TOP_P || 0.9) : 0.95,
-        repeat_penalty: 1.0,
+        temperature: sampling.temperature,
+        top_p: sampling.topP,
+        top_k: sampling.topK,
+        repeat_penalty: sampling.repeatPenalty,
+        presence_penalty: sampling.presencePenalty,
         num_predict: isCodeAgent ? Number(process.env.LLM_CODE_MAX_TOKENS || 8192) : -1,
       },
     };

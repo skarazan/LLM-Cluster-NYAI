@@ -11,6 +11,7 @@ const WRITE_CHUNK_CHARS = 6000;
 // Tools that can never be auto-approved or remembered
 const ALWAYS_CONFIRM = new Set(['delete_file', 'run_shell']);
 const TEXT_WRITE_TOOLS = new Set(['write_file', 'append_file']);
+const DISABLED_MODEL_TOOLS = new Set(['create_dir']);
 
 /**
  * Run one full agent turn.
@@ -177,7 +178,10 @@ async function runAgentTurn(opts) {
     if (ctx.ok) projectContext = ctx;
   } catch {}
   const freshTodos = createTaskTodoList(messages, approvedPlan, workspace);
-  const taskTodos = mergeTodoState({ items: agentState.todos?.length ? agentState.todos : todoState?.items }, freshTodos);
+  const taskTodos = pruneTodoListForFileWork(
+    mergeTodoState({ items: agentState.todos?.length ? agentState.todos : todoState?.items }, freshTodos),
+    workspace,
+  );
   agentState.todos = taskTodos;
   if (todoState) todoState.items = taskTodos;
   const persistAgentState = async () => {
@@ -236,6 +240,7 @@ WORKFLOW RULES:
 7. Say "Done." only when every todo is done and verification passes or is impossible with a stated reason.
 8. Do not repeat successful completed operations. Re-read only when needed to edit or verify current file state.
 9. A todo is done only when its file exists or the relevant operation actually changed something. "Directory already exists" is not progress on a file todo.
+10. create_dir is unavailable. Parent directories are created automatically by <write_file>. If a folder exists, move on to writing the next file.
 ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : ''}
 ${formatTodoListForPrompt(taskTodos)}
 ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''}
@@ -715,11 +720,6 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
       toolCallCount++;
 
       const toolName = call.function?.name || call.name;
-      if (TEXT_WRITE_TOOLS.has(toolName)) {
-        appendBubble('error', `Tool "${toolName}" is disabled as a native tool. Use <${toolName} path="...">...</${toolName}> text blocks instead.`);
-        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: `${toolName} is not available as a JSON tool because large file contents break llama.cpp parsing. Emit XML write blocks in assistant text instead.` }) });
-        continue;
-      }
       // llama.cpp / OpenAI format returns arguments as a JSON *string*; Ollama returns a parsed object.
       // Always normalise to an object here.
       let rawArgs = call.function?.arguments ?? call.arguments ?? {};
@@ -732,6 +732,29 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
         }
       } else {
         args = rawArgs;
+      }
+      if (TEXT_WRITE_TOOLS.has(toolName)) {
+        appendBubble('error', `Tool "${toolName}" is disabled as a native tool. Use <${toolName} path="...">...</${toolName}> text blocks instead.`);
+        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: `${toolName} is not available as a JSON tool because large file contents break llama.cpp parsing. Emit XML write blocks in assistant text instead.` }) });
+        history.push({ role: 'user', content: buildContinuationNudge(taskTodos, workspace) });
+        break;
+      }
+      if (DISABLED_MODEL_TOOLS.has(toolName)) {
+        const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+        const error = `Tool "${toolName}" is disabled. Parent directories are created automatically by <write_file>; write the next target file instead.`;
+        addActivity({
+          kind: 'write',
+          status: 'error',
+          title: `Blocked ${toolName}`,
+          subtitle: args.path || first?.path || '',
+          detail: { tool: toolName, path: args.path || '', status: 'blocked', error },
+        });
+        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error }) });
+        history.push({
+          role: 'user',
+          content: `${error}\nNext file todo: ${first ? `${first.title}${first.path ? ` (${first.path})` : ''}` : 'unknown'}\nEmit a complete <write_file> block for that file now. Do not call create_dir. Do not narrate.`,
+        });
+        break;
       }
       const toolDef  = getTool(toolName);
       const risk     = toolDef ? toolDef.risk : 'write';
@@ -963,6 +986,9 @@ function attachAgentStateToToolArgs(toolName, args, agentState) {
   }
   if (!next.path) return next;
   if (toolName === 'read_file') {
+    if (!next.limit && (agentState?.todos || []).some(todo => todo.path && sameTodoPath(todo.path, next.path) && todo.status !== 'done')) {
+      next.limit = 5000;
+    }
     const snap = getReadSnapshot(agentState, next.path);
     if (snap) next.readSnapshot = snap;
     return next;
@@ -1243,7 +1269,10 @@ function createTaskTodoList(messages, approvedPlan, workspace) {
     .map(line => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim())
     .filter(line => line.length > 8);
 
-  for (const line of planLines) addTodo(todos, seen, line, extractFirstPath(line, workspace));
+  for (const line of planLines) {
+    const filePath = extractFirstPath(line, workspace);
+    if (filePath) addTodo(todos, seen, `Create or update ${shortPath(filePath)}`, filePath);
+  }
 
   const pathRe = /(?:^|[\s"'`(])((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))/gi;
   for (const match of source.matchAll(pathRe)) {
@@ -1257,8 +1286,31 @@ function createTaskTodoList(messages, approvedPlan, workspace) {
   if (/css|style/i.test(source) && !todos.some(t => /\.css$/i.test(t.path || '') || /css|style/i.test(t.title))) {
     addTodo(todos, seen, 'Create or update CSS styling', `${workspace}/style.css`);
   }
+  if (todos.length === 0 && /website|web app|clone|simulator|html|css|javascript|frontend/i.test(source)) {
+    addTodo(todos, seen, 'Create or update index.html', `${workspace}/index.html`);
+    addTodo(todos, seen, 'Create or update style.css', `${workspace}/style.css`);
+    addTodo(todos, seen, 'Create or update script.js', `${workspace}/script.js`);
+  }
 
   return todos;
+}
+
+function pruneTodoListForFileWork(todos, workspace) {
+  const normalized = [];
+  const seen = new Set();
+  for (const todo of todos || []) {
+    const path = todo.path ? normalizeTodoPath(todo.path, workspace) : null;
+    if (path && !looksLikeSourcePath(path)) continue;
+    const key = path || todo.title.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ ...todo, path, id: normalized.length + 1 });
+  }
+  const hasFileTodos = normalized.some(todo => todo.path);
+  const kept = hasFileTodos
+    ? normalized.filter(todo => todo.path)
+    : normalized.slice(0, 5);
+  return kept.map((todo, index) => ({ ...todo, id: index + 1 }));
 }
 
 function mergeTodoState(todoState, freshTodos) {
