@@ -181,7 +181,9 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         const lim   = Math.min(Math.max(1, args.limit || DEFAULT_READ_LINES), MAX_READ_LINES);
         const end = Math.min(lines.length, off + lim);
         const body = lines.slice(off, end).join('\n');
-        const suffix = end < lines.length ? `\n\n[read_file truncated: showing lines ${off + 1}-${end} of ${lines.length}. Call read_file with offset=${end + 1} to continue.]` : '';
+        const suffix = end < lines.length
+          ? `\n\n[read_file preview: file has ${lines.length} total lines; only lines ${off + 1}-${end} are shown to save context. This does NOT mean the file is incomplete. Call read_file with offset=${end + 1} only if you truly need later lines.]`
+          : '';
         return { ok: true, result: body + suffix };
       }
 
@@ -222,20 +224,57 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         }
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
+        let existed = false;
+        let previousBytes = 0;
+        let previousContent = null;
+        try {
+          const stat = await fs.stat(check.resolved);
+          existed = stat.isFile();
+          previousBytes = stat.size;
+          if (existed) previousContent = await fs.readFile(check.resolved, 'utf8');
+        } catch {
+          existed = false;
+        }
         await fs.mkdir(path.dirname(check.resolved), { recursive: true });
         await fs.writeFile(check.resolved, args.content, 'utf8');
-        return { ok: true, result: `Written ${check.resolved}` };
+        const bytes = Buffer.byteLength(String(args.content), 'utf8');
+        const unchanged = existed && previousContent === String(args.content);
+        return {
+          ok: true,
+          result: unchanged ? `File unchanged: ${check.resolved}` : existed ? `Overwrote existing file: ${check.resolved}` : `Created file: ${check.resolved}`,
+          alreadyExists: existed,
+          previousBytes,
+          bytes,
+          unchanged,
+        };
       }
 
       case 'append_file': {
         if (args.content == null) return { ok: false, error: 'append_file requires "content" argument' };
+        if (String(args.content).length === 0) return { ok: false, error: 'append_file content is empty; no file changes were made' };
         if (String(args.content).length > MAX_NATIVE_WRITE_CHARS) {
           return { ok: false, error: `append_file content is too large for a native tool call (${String(args.content).length} chars). Use <append_file> text blocks so the client can chunk it safely.` };
         }
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
+        let existed = false;
+        let previousBytes = 0;
+        try {
+          const stat = await fs.stat(check.resolved);
+          existed = stat.isFile();
+          previousBytes = stat.size;
+        } catch {
+          existed = false;
+        }
+        await fs.mkdir(path.dirname(check.resolved), { recursive: true });
         await fs.appendFile(check.resolved, args.content, 'utf8');
-        return { ok: true, result: `Appended to ${check.resolved}` };
+        return {
+          ok: true,
+          result: existed ? `Appended to existing file: ${check.resolved}` : `Created file by append: ${check.resolved}`,
+          alreadyExists: existed,
+          previousBytes,
+          bytes: previousBytes + Buffer.byteLength(String(args.content), 'utf8'),
+        };
       }
 
       case 'edit_file': {
@@ -272,8 +311,18 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
       case 'create_dir': {
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
+        let existed = false;
+        try {
+          existed = (await fs.stat(check.resolved)).isDirectory();
+        } catch {
+          existed = false;
+        }
         await fs.mkdir(check.resolved, { recursive: true });
-        return { ok: true, result: `Created ${check.resolved}` };
+        return {
+          ok: true,
+          result: existed ? `Directory already exists: ${check.resolved}` : `Created ${check.resolved}`,
+          alreadyExists: existed,
+        };
       }
 
       case 'delete_file': {

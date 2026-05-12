@@ -232,6 +232,10 @@ function formatActivityDetail(detail) {
   if (detail.command) lines.push(`Command: ${detail.command}`);
   if (detail.lines != null) lines.push(`Lines: ${detail.lines}`);
   if (detail.chunks != null) lines.push(`Chunks: ${detail.chunks}`);
+  if (detail.alreadyExists != null) lines.push(`Already existed: ${detail.alreadyExists ? 'yes' : 'no'}`);
+  if (detail.unchanged != null) lines.push(`Changed content: ${detail.unchanged ? 'no' : 'yes'}`);
+  if (detail.previousBytes != null) lines.push(`Previous bytes: ${detail.previousBytes}`);
+  if (detail.bytes != null) lines.push(`Bytes: ${detail.bytes}`);
   if (detail.preview) lines.push(`\nPreview:\n${detail.preview}`);
   if (detail.diff) lines.push(`\nDiff:\n${detail.diff}`);
   if (detail.result) lines.push(`\nResult:\n${typeof detail.result === 'string' ? detail.result : JSON.stringify(detail.result, null, 2)}`);

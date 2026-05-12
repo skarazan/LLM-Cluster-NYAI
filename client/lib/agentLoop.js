@@ -182,6 +182,7 @@ CRITICAL PATH RULES — NEVER violate:
 - Every tool call that takes a path argument MUST use an absolute path starting with "${workspace}/"
 - list_dir root = "${workspace}" — call it as: list_dir({"path": "${workspace}"})
 - read_file example: read_file({"path": "${workspace}/src/index.js"})
+- A capped read_file result is only a preview. It does NOT mean the file is incomplete.
 - write_file example: <write_file path="${workspace}/src/newfile.js">content here</write_file>
 - NEVER pass "undefined", "null", "", ".", or any relative path as a path argument
 - NEVER guess or omit the workspace prefix
@@ -212,6 +213,7 @@ WORKFLOW RULES:
 5. After file creation/editing, verify locally with suitable commands when possible.
 6. Say "Done." only when every todo is done and verification passes or is impossible with a stated reason.
 7. Do not repeat successful completed operations. Re-read only when needed to edit or verify current file state.
+8. A todo is done only when its file exists or the relevant operation actually changed something. "Directory already exists" is not progress on a file todo.
 ${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : ''}
 ${formatTodoListForPrompt(taskTodos)}
 `,
@@ -229,6 +231,7 @@ ${formatTodoListForPrompt(taskTodos)}
   let plainContinuationCount = 0;
   let incompleteWriteRetries = 0;
   let emptyContinuationCount = 0;
+  const successfulActionFingerprints = new Map();
 
   // Live stream bubble — shows tokens as they arrive via IPC 'stream-chunk'
   let activeStreamEl = null;
@@ -454,23 +457,33 @@ ${formatTodoListForPrompt(taskTodos)}
           continue;
         }
         block = normalized.block;
+        markTodoInProgress(taskTodos, block.path);
+        refreshTodoView();
         const result = await executeTextWriteBlock(block, workspace);
         if (result.ok) {
-          markTodoDone(taskTodos, block.path);
+          markTodoDone(taskTodos, block.path, {
+            kind: result.unchanged ? 'unchanged_existing_file' : block.tool === 'append_file' ? 'append' : (result.alreadyExists ? 'overwrite' : 'create'),
+            path: block.path,
+            lines: result.lines,
+            bytes: result.bytes,
+          });
           markRelatedTodosDone(taskTodos, block.path, block.content);
           refreshTodoView();
           const parts = result.chunks > 1 ? ` (${result.lines} lines, auto-chunked ${result.chunks} parts)` : '';
           addActivity({
             kind: 'write',
             status: 'success',
-            title: `Wrote ${shortPath(block.path)}${parts}`,
+            title: `${result.unchanged ? 'Unchanged' : result.alreadyExists && block.tool === 'write_file' ? 'Overwrote' : result.alreadyExists ? 'Appended' : 'Created'} ${shortPath(block.path)}${parts}`,
             subtitle: block.path,
             detail: {
               path: block.path,
               tool: block.tool,
-              status: 'written',
+              status: result.unchanged ? 'unchanged' : 'written',
               lines: result.lines,
               chunks: result.chunks,
+              previousBytes: result.previousBytes,
+              alreadyExists: result.alreadyExists,
+              unchanged: result.unchanged,
               preview: previewText(block.content),
               result: result.result,
             },
@@ -737,7 +750,13 @@ ${formatTodoListForPrompt(taskTodos)}
             break;
           }
         } else {
-          if (['edit_file', 'replace_file_range', 'create_dir'].includes(toolName) && args.path) markTodoDone(taskTodos, args.path);
+          const repeatedSuccesses = recordSuccessfulAction(successfulActionFingerprints, toolName, args, toolResult);
+          if (['edit_file', 'replace_file_range'].includes(toolName) && args.path) {
+            markTodoDone(taskTodos, args.path, { kind: toolName, path: args.path });
+          }
+          if (toolName === 'create_dir' && args.path && !toolResult.alreadyExists) {
+            markTodoDone(taskTodos, args.path, { kind: 'create_dir', path: args.path });
+          }
           if (toolName === 'edit_file') markRelatedTodosDone(taskTodos, args.path, args.new_string || '');
           if (toolName === 'replace_file_range') markRelatedTodosDone(taskTodos, args.path, args.content || '');
           refreshTodoView();
@@ -751,6 +770,18 @@ ${formatTodoListForPrompt(taskTodos)}
               subtitle: args.path || args.root || args.pattern || args.cmd || '',
               detail: buildToolActivityDetail(toolName, args, toolResult),
             });
+          }
+          if (repeatedSuccesses >= 2 || (toolName === 'create_dir' && toolResult.alreadyExists)) {
+            history.push({
+              role: 'tool',
+              tool_call_id: call.id,
+              content: `<tool_result tool="${toolName}">\n${JSON.stringify(toolResult)}\n</tool_result>`,
+            });
+            history.push({
+              role: 'user',
+              content: `That ${toolName} action did not create new file content${toolResult.alreadyExists ? ' because the directory already existed' : ''}. Stop repeating it. Move to the first pending file todo now:\n${formatTodoListForPrompt(taskTodos)}\nUse a complete <write_file> block or another necessary tool call.`,
+            });
+            break;
           }
         }
       } else {
@@ -814,11 +845,13 @@ async function executeTextWriteBlock(block, workspace) {
   const lines = block.content.split('\n');
   const chunks = chunkFileContent(block.content);
   const firstTool = block.tool === 'append_file' ? 'append_file' : 'write_file';
+  const firstContent = chunks[0] || '';
   let result = await ipcRenderer.invoke('agent:run-tool', {
     tool: firstTool,
-    args: { path: block.path, content: chunks[0] || '' },
+    args: { path: block.path, content: firstContent },
     workspace,
   });
+  const firstResult = result;
 
   for (let i = 1; i < chunks.length && result.ok; i++) {
     result = await ipcRenderer.invoke('agent:run-tool', {
@@ -828,7 +861,14 @@ async function executeTextWriteBlock(block, workspace) {
     });
   }
 
-  return { ...result, lines: lines.length, chunks: chunks.length };
+  return {
+    ...result,
+    lines: lines.length,
+    chunks: chunks.length,
+    alreadyExists: firstResult.alreadyExists,
+    previousBytes: firstResult.previousBytes,
+    unchanged: firstResult.unchanged,
+  };
 }
 
 function chunkFileContent(content) {
@@ -1018,7 +1058,7 @@ function addTodo(todos, seen, title, path) {
   const key = path || title.toLowerCase();
   if (seen.has(key)) return;
   seen.add(key);
-  todos.push({ id: todos.length + 1, title, path, status: 'pending', error: '' });
+  todos.push({ id: todos.length + 1, title, path, status: 'pending', error: '', evidence: null });
 }
 
 function extractFirstPath(text, workspace) {
@@ -1046,37 +1086,61 @@ function stripWorkspaceEchoPrefix(relativePath, workspace) {
   return relativePath;
 }
 
-function markTodoDone(todos, pathOrTitle) {
+function markTodoInProgress(todos, pathOrTitle) {
+  const todo = findTodoForTarget(todos, pathOrTitle);
+  if (!todo || todo.status === 'done') return;
+  for (const item of todos) {
+    if (item.status === 'in_progress') item.status = 'pending';
+  }
+  todo.status = 'in_progress';
+  todo.error = '';
+}
+
+function markTodoDone(todos, pathOrTitle, evidence = null) {
   const todo = findTodoForTarget(todos, pathOrTitle);
   if (!todo) return;
   todo.status = 'done';
   todo.error = '';
+  todo.evidence = evidence || { kind: 'completed', path: pathOrTitle || null };
 }
 
 function markTodoFailed(todos, pathOrTitle, error) {
   const todo = findTodoForTarget(todos, pathOrTitle) || addAdHocTodo(todos, pathOrTitle);
   todo.status = 'failed';
   todo.error = error || 'unknown error';
+  todo.evidence = null;
 }
 
 function markRelatedTodosDone(todos, path, content) {
   const haystack = `${path || ''}\n${content || ''}`;
   for (const todo of todos) {
     if (todo.status === 'done') continue;
+    // Concrete file todos must only be completed by that exact file being
+    // written/edited/verified. A stylesheet link in index.html is not proof
+    // that style.css exists.
+    if (todo.path && !sameTodoPath(todo.path, path)) continue;
     const title = todo.title.toLowerCase();
     if (/tailwind/i.test(title) && /tailwind|cdn\.tailwindcss|@tailwind/i.test(haystack)) {
       todo.status = 'done';
       todo.error = '';
+      todo.evidence = { kind: 'content_match', path };
     }
     if (/(css|style|styling)/i.test(title) && (/\.css$/i.test(path || '') || /<style|stylesheet|class=/i.test(haystack))) {
       todo.status = 'done';
       todo.error = '';
+      todo.evidence = { kind: 'content_match', path };
     }
   }
 }
 
+function sameTodoPath(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  return left === right || (left && right && shortPath(left) === shortPath(right));
+}
+
 function addAdHocTodo(todos, target) {
-  const todo = { id: todos.length + 1, title: `Resolve ${target || 'failed action'}`, path: target || null, status: 'pending', error: '' };
+  const todo = { id: todos.length + 1, title: `Resolve ${target || 'failed action'}`, path: target || null, status: 'pending', error: '', evidence: null };
   todos.push(todo);
   return todo;
 }
@@ -1136,11 +1200,26 @@ function formatTodoListForPrompt(todos) {
 }
 
 function formatTodoListForDisplay(todos) {
+  const statusMark = todo => {
+    if (todo.status === 'done') return '[x]';
+    if (todo.status === 'failed') return '[!]';
+    if (todo.status === 'in_progress') return '[>]';
+    return '[ ]';
+  };
+  const evidenceLine = todo => {
+    if (!todo.evidence) return '';
+    const bits = [
+      todo.evidence.kind,
+      todo.evidence.bytes != null ? `${todo.evidence.bytes} bytes` : '',
+      todo.evidence.lines != null ? `${todo.evidence.lines} lines` : '',
+    ].filter(Boolean).join(', ');
+    return bits ? `\n   Evidence: ${bits}` : '';
+  };
   return [
     'Todo List',
     '',
     ...(todos.length
-      ? todos.map(todo => `${todo.id}. ${todo.status === 'done' ? '[x]' : todo.status === 'failed' ? '[!]' : '[ ]'} ${todo.title}${todo.path ? `\n   ${todo.path}` : ''}${todo.error ? `\n   Error: ${todo.error}` : ''}`)
+      ? todos.map(todo => `${todo.id}. ${statusMark(todo)} ${todo.title}${todo.path ? `\n   ${todo.path}` : ''}${todo.error ? `\n   Error: ${todo.error}` : ''}${evidenceLine(todo)}`)
       : ['  (no todos detected)']),
   ].join('\n');
 }
@@ -1158,7 +1237,7 @@ function injectTodoStatus(messages, todos) {
     ...messages,
     {
       role: 'user',
-      content: `${note}${completed}\nUse this todo list as state. Work on the first pending/failed item next. Do not say Done until every todo is [done].`,
+      content: `${note}${completed}\nUse this todo list as state. Work on the first pending/failed item next. Treat [in_progress] as the current item to finish. Do not say Done until every todo is [done].`,
     },
   ];
 }
@@ -1172,6 +1251,15 @@ function recordRepeatedFailure(failures, tool, target, error) {
   const key = `${tool}:${target}:${String(error || '').slice(0, 200)}`;
   const count = (failures.get(key) || 0) + 1;
   failures.set(key, count);
+  return count;
+}
+
+function recordSuccessfulAction(successes, toolName, args, toolResult) {
+  const target = args.path || args.root || args.pattern || args.cmd || '';
+  const extra = toolName === 'create_dir' && toolResult.alreadyExists ? ':already-exists' : '';
+  const key = `${toolName}:${target}${extra}`;
+  const count = (successes.get(key) || 0) + 1;
+  successes.set(key, count);
   return count;
 }
 
@@ -1201,7 +1289,9 @@ function activityKindForTool(toolName) {
 function activityTitleForTool(toolName, args, toolResult) {
   if (toolName === 'edit_file') return `Edited ${shortPath(args.path)}`;
   if (toolName === 'replace_file_range') return `Edited ${shortPath(args.path)}:${args.start_line}-${args.end_line}`;
-  if (toolName === 'create_dir') return `Created ${shortPath(args.path)}`;
+  if (toolName === 'write_file') return toolResult.unchanged ? `Unchanged ${shortPath(args.path)}` : toolResult.alreadyExists ? `Overwrote ${shortPath(args.path)}` : `Created ${shortPath(args.path)}`;
+  if (toolName === 'append_file') return toolResult.alreadyExists ? `Appended ${shortPath(args.path)}` : `Created ${shortPath(args.path)}`;
+  if (toolName === 'create_dir') return toolResult.alreadyExists ? `Directory exists ${shortPath(args.path)}` : `Created ${shortPath(args.path)}`;
   if (toolName === 'delete_file') return `Deleted ${shortPath(args.path)}`;
   if (toolName === 'read_file') return `Read ${shortPath(args.path)}`;
   if (toolName === 'list_dir') return `Listed ${shortPath(args.path || args.root || '.')}`;
@@ -1221,6 +1311,10 @@ function buildToolActivityDetail(toolName, args, toolResult) {
     status: toolResult.ok ? 'ok' : 'failed',
     error: toolResult.ok ? '' : toolResult.error,
   };
+  if (toolResult.alreadyExists != null) detail.alreadyExists = Boolean(toolResult.alreadyExists);
+  if (toolResult.unchanged != null) detail.unchanged = Boolean(toolResult.unchanged);
+  if (toolResult.previousBytes != null) detail.previousBytes = toolResult.previousBytes;
+  if (toolResult.bytes != null) detail.bytes = toolResult.bytes;
   if (toolName === 'edit_file') {
     const oldLines = String(args.old_string || '').split('\n').map(l => `- ${l}`).join('\n');
     const newLines = String(args.new_string || '').split('\n').map(l => `+ ${l}`).join('\n');

@@ -10,7 +10,7 @@ const TOOL_DEFINITIONS = [
   // ── Tier A: read-only ──────────────────────────────────────────────
   {
     name: 'read_file',
-    description: 'Read part of a file inside the workspace. Defaults to 300 lines. Use offset and limit for large files; never read huge files all at once.',
+    description: 'Read a preview of a file inside the workspace. Defaults to 300 lines. A truncated read means the file is longer than the preview, NOT incomplete. Use offset and limit only when later lines are needed.',
     parameters: {
       type: 'object',
       properties: {
@@ -121,7 +121,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'create_dir',
-    description: 'Create a directory (and any missing parent directories).',
+    description: 'Create a directory (and any missing parent directories). Do not call this for the workspace root or for a file path. If the directory already exists, this is a no-op and does not complete file creation.',
     parameters: {
       type: 'object',
       properties: {
