@@ -101,6 +101,17 @@ function updateWorkspaceLabel() {
   }
 }
 
+async function loadWorkspaceTodoState() {
+  if (!workspace) return;
+  try {
+    const r = await ipcRenderer.invoke('agent:load-state', { workspace });
+    if (r.ok && Array.isArray(r.state?.todos)) {
+      todoState.items = r.state.todos;
+      latestTodoDetail = formatTodoStateForPanel(todoState.items);
+    }
+  } catch {}
+}
+
 modeChatBtn.addEventListener('click', () => applyMode('chat'));
 modeCodeBtn.addEventListener('click', () => applyMode('code'));
 
@@ -110,6 +121,7 @@ workspaceBtn.addEventListener('click', async () => {
     workspace = result.path;
     localStorage.setItem(WORKSPACE_KEY, workspace);
     updateWorkspaceLabel();
+    loadWorkspaceTodoState();
   }
 });
 
@@ -236,7 +248,14 @@ function formatActivityDetail(detail) {
   if (detail.unchanged != null) lines.push(`Changed content: ${detail.unchanged ? 'no' : 'yes'}`);
   if (detail.repairedDirectory != null) lines.push(`Repaired file-path directory: ${detail.repairedDirectory ? 'yes' : 'no'}`);
   if (detail.previousBytes != null) lines.push(`Previous bytes: ${detail.previousBytes}`);
+  if (detail.beforeBytes != null) lines.push(`Before bytes: ${detail.beforeBytes}`);
+  if (detail.afterBytes != null) lines.push(`After bytes: ${detail.afterBytes}`);
   if (detail.bytes != null) lines.push(`Bytes: ${detail.bytes}`);
+  if (detail.beforeHash) lines.push(`Before hash: ${detail.beforeHash}`);
+  if (detail.afterHash) lines.push(`After hash: ${detail.afterHash}`);
+  if (detail.mtimeMs != null) lines.push(`Modified: ${new Date(detail.mtimeMs).toLocaleString()}`);
+  if (detail.changed != null) lines.push(`Changed: ${detail.changed ? 'yes' : 'no'}`);
+  if (detail.dedup != null) lines.push(`Read deduped: ${detail.dedup ? 'yes' : 'no'}`);
   if (detail.preview) lines.push(`\nPreview:\n${detail.preview}`);
   if (detail.diff) lines.push(`\nDiff:\n${detail.diff}`);
   if (detail.result) lines.push(`\nResult:\n${typeof detail.result === 'string' ? detail.result : JSON.stringify(detail.result, null, 2)}`);
@@ -252,6 +271,12 @@ activityClose.addEventListener('click', () => {
 
 function updateTodoView(detail) {
   latestTodoDetail = detail || 'No active todo list yet.';
+}
+
+function formatTodoStateForPanel(items) {
+  if (!items || !items.length) return 'No active todo list yet.';
+  const mark = item => item.status === 'done' ? '[x]' : item.status === 'failed' ? '[!]' : item.status === 'in_progress' ? '[>]' : '[ ]';
+  return ['Todo List', '', ...items.map(item => `${item.id}. ${mark(item)} ${item.title}${item.path ? `\n   ${item.path}` : ''}${item.error ? `\n   Error: ${item.error}` : ''}`)].join('\n');
 }
 
 todoBtn.addEventListener('click', () => {
@@ -468,3 +493,4 @@ input.addEventListener('keydown', e => {
 
 // On launch: ping the default/saved URL
 ping();
+loadWorkspaceTodoState();

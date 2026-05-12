@@ -14,6 +14,24 @@ const workers = new Map();
 
 // Job queue: jobId -> { resolve, reject, timer, model, messages, workerId }
 const pendingJobs = new Map();
+const jobStatuses = new Map();
+
+function setJobStatus(jobId, status, extra = {}) {
+  const previous = jobStatuses.get(jobId) || {};
+  const next = {
+    ...previous,
+    ...extra,
+    jobId,
+    status,
+    updatedAt: Date.now(),
+  };
+  jobStatuses.set(jobId, next);
+  return next;
+}
+
+function getJobStatus(jobId) {
+  return jobStatuses.get(jobId) || null;
+}
 
 // Streaming chunk listeners: jobId → callback(content)
 const chunkListeners = new Map();
@@ -141,7 +159,10 @@ setInterval(() => {
       for (const [jobId, job] of pendingJobs) {
         if (job.workerId === id) {
           clearTimeout(job.timer);
-          job.reject(new Error(`Worker ${worker.name} went offline`));
+          setJobStatus(jobId, 'timed_out', { workerId: id, stage: 'heartbeat', error: `Worker ${worker.name} went offline` });
+          const err = new Error(`Worker ${worker.name} went offline`);
+          err.payload = { retryable: true, stage: 'heartbeat', jobId, status: 'timed_out' };
+          job.reject(err);
           pendingJobs.delete(jobId);
         }
       }
@@ -189,11 +210,14 @@ function sendPromptToWorker(worker, messages, model, tools, jobId, meta = {}) {
 
     const timer = setTimeout(() => {
       pendingJobs.delete(jobId);
+      setJobStatus(jobId, 'timed_out', { workerId: worker.id, stage: 'manager_wait', error: `Worker ${worker.name} timed out` });
       const err = new Error(`Worker ${worker.name} timed out`);
       err.name = 'AbortError';
+      err.payload = { retryable: true, stage: 'manager_wait', jobId, status: 'timed_out' };
       reject(err);
     }, JOB_TIMEOUT_MS);
 
+    setJobStatus(jobId, 'queued', { workerId: worker.id, workerName: worker.name, model, agentMode: meta.agentMode || null });
     pendingJobs.set(jobId, {
       resolve,
       reject,
@@ -222,6 +246,7 @@ function dispatchToWorker(worker, jobId) {
     const waiter = worker.waiters.shift();
     if (!waiter.timedOut) {
       job.dispatchedAt = Date.now();
+      setJobStatus(jobId, 'dispatched', { workerId: worker.id, workerName: worker.name, dispatchedAt: job.dispatchedAt });
       const jobPayload = {
         id: jobId,
         model: job.model,
@@ -255,6 +280,7 @@ function pollForJob(workerId, res) {
     if (job.workerId === workerId) {
       console.log(`[poll] delivering queued job=${jobId} to worker=${worker.name}`);
       job.dispatchedAt = Date.now();
+      setJobStatus(jobId, 'dispatched', { workerId, workerName: worker.name, dispatchedAt: job.dispatchedAt });
       const jobPayload = {
         id: jobId,
         model: job.model,
@@ -309,17 +335,38 @@ function pollForJob(workerId, res) {
   });
 }
 
+function markJobHeartbeat(jobId, workerId, stage = 'running') {
+  const worker = workers.get(workerId);
+  refreshHeartbeat(workerId);
+  const job = pendingJobs.get(jobId);
+  if (!job) return false;
+  if (job.workerId !== workerId) return false;
+  setJobStatus(jobId, stage, {
+    workerId,
+    workerName: worker?.name || '',
+    lastHeartbeat: Date.now(),
+  });
+  return true;
+}
+
 // Called by workerRoutes: worker posts the result back
 function submitJobResult(jobId, result, error) {
   const job = pendingJobs.get(jobId);
-  if (!job) return false; // already timed out or duplicate
+  const status = getJobStatus(jobId);
+  if (!job) return false; // already timed out, cancelled, or duplicate
+  if (status?.status === 'cancelled') return false;
 
   clearTimeout(job.timer);
   pendingJobs.delete(jobId);
 
   if (error) {
-    job.reject(new Error(error));
+    const errorPayload = typeof error === 'object' ? error : null;
+    setJobStatus(jobId, errorPayload?.status || 'completed', { ok: false, error, finishReason: result?.finish_reason || null });
+    const err = new Error(typeof error === 'string' ? error : (error.message || 'Worker error'));
+    err.payload = errorPayload || { retryable: true, stage: 'worker', jobId, status: 'completed' };
+    job.reject(err);
   } else {
+    setJobStatus(jobId, 'completed', { ok: true, finishReason: result?.finish_reason || null });
     job.resolve(result);
   }
   return true;
@@ -330,8 +377,10 @@ function cancelJob(jobId) {
   if (!job) return false;
   clearTimeout(job.timer);
   pendingJobs.delete(jobId);
+  setJobStatus(jobId, 'cancelled', { workerId: job.workerId, stage: 'client_cancel' });
   const err = new Error('Job cancelled by client');
   err.name = 'AbortError';
+  err.payload = { retryable: false, stage: 'client_cancel', jobId, status: 'cancelled' };
   job.reject(err);
   return true;
 }
@@ -349,6 +398,8 @@ module.exports = {
   pollForJob,
   submitJobResult,
   cancelJob,
+  getJobStatus,
+  markJobHeartbeat,
   addChunkListener,
   removeChunkListener,
   emitChunk,

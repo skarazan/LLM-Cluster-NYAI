@@ -54,6 +54,7 @@
     },
     "files": [
       "main.js",
+      "lib/**/*",
       "renderer/**/*"
     ]
   }

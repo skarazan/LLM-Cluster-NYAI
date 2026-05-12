@@ -10,15 +10,50 @@ const TOOL_DEFINITIONS = [
   // ── Tier A: read-only ──────────────────────────────────────────────
   {
     name: 'read_file',
-    description: 'Read a preview of a file inside the workspace. Defaults to 300 lines. A truncated read means the file is longer than the preview, NOT incomplete. Use offset and limit only when later lines are needed.',
+    description: 'Read a file inside the workspace. Defaults to 300 lines. A truncated read means the file is longer than the preview, NOT incomplete. Before editing/overwriting an existing file, read it fully with a high limit such as 5000.',
     parameters: {
       type: 'object',
       properties: {
         path:   { type: 'string', description: 'Path to the file (relative to workspace root or absolute).' },
         offset: { type: 'number', description: 'Line number to start reading from (1-indexed). Optional.' },
-        limit:  { type: 'number', description: 'Maximum number of lines to read. Optional, max 1000.' },
+        limit:  { type: 'number', description: 'Maximum number of lines to read. Optional, max 5000.' },
       },
       required: ['path'],
+    },
+    risk: 'read',
+  },
+  {
+    name: 'read_many_files',
+    description: 'Read several files in one call. Use this for small related files or resume checks instead of repeatedly calling read_file. Returns unchanged stubs for files already read fully and unchanged.',
+    parameters: {
+      type: 'object',
+      properties: {
+        paths: { type: 'array', items: { type: 'string' }, description: 'Absolute paths to read, max 12 files.' },
+      },
+      required: ['paths'],
+    },
+    risk: 'read',
+  },
+  {
+    name: 'file_state',
+    description: 'Check file existence/type/bytes/hash/mtime without reading full content. Use before deciding whether work already exists.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Single absolute path to inspect.' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Several absolute paths to inspect, max 12.' },
+      },
+      required: [],
+    },
+    risk: 'read',
+  },
+  {
+    name: 'inspect_project',
+    description: 'Return compact project context: top tree, package scripts, and local instruction files such as CLAUDE.md, AGENTS.md, README.md, and .cursorrules. Use once before large coding tasks.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
     },
     risk: 'read',
   },

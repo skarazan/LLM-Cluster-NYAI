@@ -3,6 +3,7 @@ const path   = require('path');
 const fs     = require('fs/promises');
 const fsSync = require('fs');
 const cp     = require('child_process');
+const crypto = require('crypto');
 const { resolveSafe, checkShellCommand } = require('./lib/sandbox');
 const { getTool } = require('./lib/tools');
 
@@ -12,12 +13,162 @@ const RELEASES_URL = 'https://github.com/skarazan/LLM-Cluster-NYAI/releases/late
 const RELEASES_API = 'https://api.github.com/repos/skarazan/LLM-Cluster-NYAI/releases/latest';
 const MAX_NATIVE_WRITE_CHARS = 7000;
 const DEFAULT_READ_LINES = 300;
-const MAX_READ_LINES = 1000;
+const MAX_READ_LINES = 5000;
 const MAX_LIST_ENTRIES = 500;
 const MAX_SEARCH_RESULTS = 200;
+const MAX_PROJECT_CONTEXT_CHARS = 12000;
+const MAX_BATCH_READ_FILES = 12;
+const MAX_BATCH_READ_CHARS = 40000;
 const IGNORE_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.vite', 'coverage', '.cache']);
+const PROJECT_MEMORY_FILES = ['CLAUDE.md', 'AGENTS.md', 'README.md', '.cursorrules'];
+const PROJECT_CONFIG_FILES = ['package.json', 'pyproject.toml', 'requirements.txt', 'vite.config.js', 'next.config.js', 'tailwind.config.js', 'tsconfig.json'];
 const FILE_LIKE_EXTENSION_RE = /\.(?:html?|css|js|mjs|cjs|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml|env)$/i;
 const activePromptControllers = new Map();
+
+function hashText(text) {
+  return crypto.createHash('sha256').update(String(text), 'utf8').digest('hex');
+}
+
+function safeStateKey(workspace) {
+  return crypto.createHash('sha256').update(String(workspace || ''), 'utf8').digest('hex');
+}
+
+function agentStatePath(workspace) {
+  return path.join(app.getPath('userData'), 'agent-state', `${safeStateKey(workspace)}.json`);
+}
+
+function emptyAgentState(workspace) {
+  return {
+    version: 1,
+    sessionId: safeStateKey(workspace).slice(0, 16),
+    workspace,
+    updatedAt: new Date().toISOString(),
+    todos: [],
+    fileHistory: [],
+    readState: {},
+    actionFingerprints: {},
+  };
+}
+
+async function loadAgentState(workspace) {
+  const statePath = agentStatePath(workspace);
+  try {
+    const raw = await fs.readFile(statePath, 'utf8');
+    return { ...emptyAgentState(workspace), ...JSON.parse(raw), workspace };
+  } catch {
+    return emptyAgentState(workspace);
+  }
+}
+
+async function saveAgentState(workspace, state) {
+  const statePath = agentStatePath(workspace);
+  await fs.mkdir(path.dirname(statePath), { recursive: true });
+  const payload = {
+    ...emptyAgentState(workspace),
+    ...(state || {}),
+    workspace,
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(statePath, JSON.stringify(payload, null, 2), 'utf8');
+  return payload;
+}
+
+async function snapshotFile(resolved) {
+  const stat = await fs.stat(resolved);
+  if (!stat.isFile()) return { isFile: false, isDirectory: stat.isDirectory(), bytes: stat.size, mtimeMs: stat.mtimeMs };
+  const raw = await fs.readFile(resolved, 'utf8');
+  return {
+    isFile: true,
+    isDirectory: false,
+    bytes: stat.size,
+    mtimeMs: Math.floor(stat.mtimeMs),
+    hash: hashText(raw),
+    preview: raw.split('\n').slice(0, 20).join('\n').slice(0, 2000),
+  };
+}
+
+async function collectProjectContext(workspace) {
+  const rootCheck = resolveSafe(workspace, '.');
+  if (!rootCheck.ok) return { ok: false, error: rootCheck.error };
+  const root = rootCheck.resolved;
+  const files = [];
+  const scripts = {};
+  let chars = 0;
+
+  for (const name of [...PROJECT_MEMORY_FILES, ...PROJECT_CONFIG_FILES]) {
+    const full = path.join(root, name);
+    try {
+      const stat = await fs.stat(full);
+      if (!stat.isFile() || stat.size > 250_000) continue;
+      const raw = await fs.readFile(full, 'utf8');
+      const remaining = MAX_PROJECT_CONTEXT_CHARS - chars;
+      if (remaining <= 0) break;
+      const text = raw.slice(0, Math.min(raw.length, remaining));
+      chars += text.length;
+      files.push({
+        path: full,
+        name,
+        bytes: stat.size,
+        truncated: raw.length > text.length,
+        text,
+      });
+      if (name === 'package.json') {
+        try {
+          const pkg = JSON.parse(raw);
+          Object.assign(scripts, pkg.scripts || {});
+        } catch {}
+      }
+    } catch {}
+  }
+
+  const tree = await buildWorkspaceTree(root, root, 2, 180);
+  return {
+    ok: true,
+    workspace,
+    files,
+    scripts,
+    tree,
+    summary: renderProjectContext({ workspace, files, scripts, tree }),
+  };
+}
+
+async function buildWorkspaceTree(root, dir, depth, limit, prefix = '') {
+  if (depth < 0 || limit <= 0) return [];
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  entries = entries
+    .filter(entry => !entry.name.startsWith('.') || PROJECT_MEMORY_FILES.includes(entry.name))
+    .filter(entry => !IGNORE_DIRS.has(entry.name))
+    .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+
+  const rows = [];
+  for (const entry of entries) {
+    if (rows.length >= limit) break;
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    rows.push(`${entry.isDirectory() ? 'dir ' : 'file'} ${rel}`);
+    if (entry.isDirectory() && depth > 0) {
+      const childRows = await buildWorkspaceTree(root, path.join(dir, entry.name), depth - 1, limit - rows.length, rel);
+      rows.push(...childRows);
+    }
+  }
+  return rows;
+}
+
+function renderProjectContext(ctx) {
+  const parts = [`PROJECT CONTEXT for ${ctx.workspace}`];
+  if (ctx.tree?.length) parts.push(`Top-level tree:\n${ctx.tree.slice(0, 120).join('\n')}`);
+  if (Object.keys(ctx.scripts || {}).length) {
+    parts.push(`Package scripts:\n${Object.entries(ctx.scripts).map(([k, v]) => `- npm run ${k}: ${v}`).join('\n')}`);
+  }
+  for (const file of ctx.files || []) {
+    parts.push(`--- ${file.name}${file.truncated ? ' (truncated)' : ''} ---\n${file.text}`);
+  }
+  return parts.join('\n\n');
+}
 
 // --- Update check: compare current version against latest GitHub release ---
 async function checkForUpdates() {
@@ -128,7 +279,7 @@ ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools
     }
 
     if (!finalData) throw new Error('No response received from server');
-    if (finalData.error) throw new Error(finalData.error);
+    if (finalData.error) return { ok: false, error: finalData.error, error_details: finalData.error_details || null, jobId: finalData.jobId || requestId || null };
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return { ok: true, data: finalData };
   } catch (err) {
@@ -164,6 +315,43 @@ ipcMain.handle('agent:choose-workspace', async () => {
   return { ok: true, path: result.filePaths[0] };
 });
 
+ipcMain.handle('agent:load-state', async (event, { workspace }) => {
+  if (!workspace) return { ok: false, error: 'Missing workspace' };
+  try {
+    return { ok: true, state: await loadAgentState(workspace) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:save-state', async (event, { workspace, state }) => {
+  if (!workspace) return { ok: false, error: 'Missing workspace' };
+  try {
+    return { ok: true, state: await saveAgentState(workspace, state) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:get-file-state', async (event, { workspace, path: targetPath }) => {
+  const check = resolveSafe(workspace, targetPath);
+  if (!check.ok) return { ok: false, error: check.error };
+  try {
+    return { ok: true, path: targetPath, resolved: check.resolved, snapshot: await snapshotFile(check.resolved) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:get-project-context', async (event, { workspace }) => {
+  if (!workspace) return { ok: false, error: 'Missing workspace' };
+  try {
+    return await collectProjectContext(workspace);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 // ── Agent: execute a tool in the main process (sandboxed) ───────────────────
 ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
   console.log(`[tool] ${tool} workspace="${workspace}" args=${JSON.stringify(args)}`);
@@ -177,15 +365,130 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
         const raw = await fs.readFile(check.resolved, 'utf8');
+        const stat = await fs.stat(check.resolved);
+        const fullHash = hashText(raw);
         const lines = raw.split('\n');
         const off   = Math.max(0, (args.offset || 1) - 1);
         const lim   = Math.min(Math.max(1, args.limit || DEFAULT_READ_LINES), MAX_READ_LINES);
         const end = Math.min(lines.length, off + lim);
+        const isFullRead = off === 0 && end >= lines.length;
+        if (
+          args.readSnapshot &&
+          args.readSnapshot.hash === fullHash &&
+          Number(args.readSnapshot.offset || 1) === off + 1 &&
+          Number(args.readSnapshot.limit || DEFAULT_READ_LINES) === lim
+        ) {
+          return {
+            ok: true,
+            result: `File unchanged since last read: ${args.path}. Use the earlier read_file result in this conversation unless you need a different range.`,
+            dedup: true,
+            snapshot: {
+              path: args.path,
+              hash: fullHash,
+              bytes: stat.size,
+              mtimeMs: Math.floor(stat.mtimeMs),
+              offset: off + 1,
+              limit: lim,
+              totalLines: lines.length,
+              isFullRead,
+            },
+          };
+        }
         const body = lines.slice(off, end).join('\n');
         const suffix = end < lines.length
           ? `\n\n[read_file preview: file has ${lines.length} total lines; only lines ${off + 1}-${end} are shown to save context. This does NOT mean the file is incomplete. Call read_file with offset=${end + 1} only if you truly need later lines.]`
           : '';
-        return { ok: true, result: body + suffix };
+        return {
+          ok: true,
+          result: body + suffix,
+          snapshot: {
+            path: args.path,
+            hash: fullHash,
+            bytes: stat.size,
+            mtimeMs: Math.floor(stat.mtimeMs),
+            offset: off + 1,
+            limit: lim,
+            totalLines: lines.length,
+            isFullRead,
+          },
+        };
+      }
+
+      case 'read_many_files': {
+        const paths = Array.isArray(args.paths) ? args.paths.slice(0, MAX_BATCH_READ_FILES) : [];
+        if (paths.length === 0) return { ok: false, error: 'read_many_files requires a non-empty paths array' };
+        const readSnapshots = args.readSnapshots && typeof args.readSnapshots === 'object' ? args.readSnapshots : {};
+        let usedChars = 0;
+        const files = [];
+        for (const targetPath of paths) {
+          const check = resolveSafe(workspace, targetPath);
+          if (!check.ok) {
+            files.push({ path: targetPath, ok: false, error: check.error });
+            continue;
+          }
+          try {
+            const raw = await fs.readFile(check.resolved, 'utf8');
+            const stat = await fs.stat(check.resolved);
+            const fullHash = hashText(raw);
+            const lines = raw.split('\n');
+            const snap = readSnapshots[targetPath] || readSnapshots[check.resolved] || null;
+            const snapshot = {
+              path: targetPath,
+              hash: fullHash,
+              bytes: stat.size,
+              mtimeMs: Math.floor(stat.mtimeMs),
+              offset: 1,
+              limit: lines.length,
+              totalLines: lines.length,
+              isFullRead: true,
+            };
+            if (snap && snap.hash === fullHash && snap.isFullRead) {
+              files.push({ path: targetPath, ok: true, dedup: true, result: `File unchanged since last full read: ${targetPath}`, snapshot });
+              continue;
+            }
+            const remaining = MAX_BATCH_READ_CHARS - usedChars;
+            if (remaining <= 0) {
+              files.push({ path: targetPath, ok: false, error: `Batch read budget exhausted after ${MAX_BATCH_READ_CHARS} chars` });
+              continue;
+            }
+            const content = raw.slice(0, remaining);
+            usedChars += content.length;
+            files.push({
+              path: targetPath,
+              ok: true,
+              result: content + (content.length < raw.length ? `\n...[read_many_files truncated ${raw.length - content.length} chars]` : ''),
+              truncated: content.length < raw.length,
+              snapshot,
+            });
+          } catch (err) {
+            files.push({ path: targetPath, ok: false, error: err.message });
+          }
+        }
+        return { ok: true, result: files, files, truncated: paths.length > MAX_BATCH_READ_FILES };
+      }
+
+      case 'file_state': {
+        const paths = Array.isArray(args.paths) ? args.paths.slice(0, MAX_BATCH_READ_FILES) : [args.path].filter(Boolean);
+        if (paths.length === 0) return { ok: false, error: 'file_state requires path or paths' };
+        const files = [];
+        for (const targetPath of paths) {
+          const check = resolveSafe(workspace, targetPath);
+          if (!check.ok) {
+            files.push({ path: targetPath, ok: false, error: check.error });
+            continue;
+          }
+          try {
+            const snap = await snapshotFile(check.resolved);
+            files.push({ path: targetPath, ok: true, ...snap });
+          } catch (err) {
+            files.push({ path: targetPath, ok: false, exists: false, error: err.message });
+          }
+        }
+        return { ok: true, result: files, files };
+      }
+
+      case 'inspect_project': {
+        return await collectProjectContext(workspace);
       }
 
       case 'list_dir': {
@@ -227,6 +530,8 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         if (!check.ok) return { ok: false, error: check.error };
         let existed = false;
         let previousBytes = 0;
+        let beforeHash = null;
+        let beforeMtimeMs = null;
         let previousContent = null;
         let repairedDirectory = false;
         try {
@@ -245,7 +550,18 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
           } else {
             existed = stat.isFile();
             previousBytes = stat.size;
-            if (existed) previousContent = await fs.readFile(check.resolved, 'utf8');
+            beforeMtimeMs = Math.floor(stat.mtimeMs);
+            if (existed) {
+              previousContent = await fs.readFile(check.resolved, 'utf8');
+              beforeHash = hashText(previousContent);
+              const snap = args.readSnapshot || null;
+              if (!snap || !snap.isFullRead) {
+                return { ok: false, error: `Existing file must be read fully before overwrite: ${args.path}`, needsRead: true };
+              }
+              if (snap.hash !== beforeHash || Math.floor(Number(snap.mtimeMs || 0)) !== beforeMtimeMs) {
+                return { ok: false, error: `File changed since last read: ${args.path}. Read it again before writing.`, staleRead: true };
+              }
+            }
           }
         } catch {
           existed = false;
@@ -254,12 +570,21 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         await fs.writeFile(check.resolved, args.content, 'utf8');
         const bytes = Buffer.byteLength(String(args.content), 'utf8');
         const unchanged = existed && previousContent === String(args.content);
+        const afterStat = await fs.stat(check.resolved);
+        const afterHash = hashText(String(args.content));
         return {
           ok: true,
           result: unchanged ? `File unchanged: ${check.resolved}` : existed ? `Overwrote existing file: ${check.resolved}` : `Created file: ${check.resolved}`,
           alreadyExists: existed,
           previousBytes,
+          beforeHash,
+          afterHash,
+          beforeBytes: previousBytes,
+          afterBytes: bytes,
+          beforeMtimeMs,
+          mtimeMs: Math.floor(afterStat.mtimeMs),
           bytes,
+          changed: !unchanged,
           unchanged,
           repairedDirectory,
         };
@@ -275,6 +600,8 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         if (!check.ok) return { ok: false, error: check.error };
         let existed = false;
         let previousBytes = 0;
+        let beforeHash = null;
+        let beforeMtimeMs = null;
         let repairedDirectory = false;
         try {
           const stat = await fs.stat(check.resolved);
@@ -292,18 +619,36 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
           } else {
             existed = stat.isFile();
             previousBytes = stat.size;
+            beforeMtimeMs = Math.floor(stat.mtimeMs);
+            if (existed) {
+              const previousContent = await fs.readFile(check.resolved, 'utf8');
+              beforeHash = hashText(previousContent);
+              const snap = args.readSnapshot || null;
+              if (!snap || !snap.isFullRead) return { ok: false, error: `Existing file must be read fully before append: ${args.path}`, needsRead: true };
+              if (snap.hash !== beforeHash || Math.floor(Number(snap.mtimeMs || 0)) !== beforeMtimeMs) {
+                return { ok: false, error: `File changed since last read: ${args.path}. Read it again before appending.`, staleRead: true };
+              }
+            }
           }
         } catch {
           existed = false;
         }
         await fs.mkdir(path.dirname(check.resolved), { recursive: true });
         await fs.appendFile(check.resolved, args.content, 'utf8');
+        const after = await snapshotFile(check.resolved);
         return {
           ok: true,
           result: existed ? `Appended to existing file: ${check.resolved}` : `Created file by append: ${check.resolved}`,
           alreadyExists: existed,
           previousBytes,
+          beforeHash,
+          afterHash: after.hash,
+          beforeBytes: previousBytes,
+          afterBytes: after.bytes,
+          beforeMtimeMs,
+          mtimeMs: after.mtimeMs,
           bytes: previousBytes + Buffer.byteLength(String(args.content), 'utf8'),
+          changed: true,
           repairedDirectory,
         };
       }
@@ -311,12 +656,31 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
       case 'edit_file': {
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
+        const beforeStat = await fs.stat(check.resolved);
         const content = await fs.readFile(check.resolved, 'utf8');
+        const beforeHash = hashText(content);
+        const snap = args.readSnapshot || null;
+        if (!snap || !snap.isFullRead) return { ok: false, error: `File must be read fully before edit: ${args.path}`, needsRead: true };
+        if (snap.hash !== beforeHash || Math.floor(Number(snap.mtimeMs || 0)) !== Math.floor(beforeStat.mtimeMs)) {
+          return { ok: false, error: `File changed since last read: ${args.path}. Read it again before editing.`, staleRead: true };
+        }
         const count = content.split(args.old_string).length - 1;
         if (count === 0) return { ok: false, error: `old_string not found in ${args.path}` };
         if (count > 1)   return { ok: false, error: `old_string appears ${count} times — must be unique` };
-        await fs.writeFile(check.resolved, content.replace(args.old_string, args.new_string), 'utf8');
-        return { ok: true, result: `Edited ${check.resolved}` };
+        const updated = content.replace(args.old_string, args.new_string);
+        await fs.writeFile(check.resolved, updated, 'utf8');
+        const after = await snapshotFile(check.resolved);
+        return {
+          ok: true,
+          result: `Edited ${check.resolved}`,
+          beforeHash,
+          afterHash: after.hash,
+          beforeBytes: beforeStat.size,
+          afterBytes: after.bytes,
+          beforeMtimeMs: Math.floor(beforeStat.mtimeMs),
+          mtimeMs: after.mtimeMs,
+          changed: beforeHash !== after.hash,
+        };
       }
 
       case 'replace_file_range': {
@@ -330,13 +694,31 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
         if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
           return { ok: false, error: 'replace_file_range requires valid 1-indexed start_line and end_line' };
         }
+        const beforeStat = await fs.stat(check.resolved);
         const raw = await fs.readFile(check.resolved, 'utf8');
+        const beforeHash = hashText(raw);
+        const snap = args.readSnapshot || null;
+        if (!snap || !snap.isFullRead) return { ok: false, error: `File must be read fully before replacing lines: ${args.path}`, needsRead: true };
+        if (snap.hash !== beforeHash || Math.floor(Number(snap.mtimeMs || 0)) !== Math.floor(beforeStat.mtimeMs)) {
+          return { ok: false, error: `File changed since last read: ${args.path}. Read it again before replacing lines.`, staleRead: true };
+        }
         const lines = raw.split('\n');
         if (end > lines.length) return { ok: false, error: `Line range ${start}-${end} exceeds file length ${lines.length}` };
         const replacement = String(args.content || '').split('\n');
         lines.splice(start - 1, end - start + 1, ...replacement);
         await fs.writeFile(check.resolved, lines.join('\n'), 'utf8');
-        return { ok: true, result: `Replaced lines ${start}-${end} in ${check.resolved}` };
+        const after = await snapshotFile(check.resolved);
+        return {
+          ok: true,
+          result: `Replaced lines ${start}-${end} in ${check.resolved}`,
+          beforeHash,
+          afterHash: after.hash,
+          beforeBytes: beforeStat.size,
+          afterBytes: after.bytes,
+          beforeMtimeMs: Math.floor(beforeStat.mtimeMs),
+          mtimeMs: after.mtimeMs,
+          changed: beforeHash !== after.hash,
+        };
       }
 
       case 'create_dir': {
@@ -346,6 +728,14 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
           return {
             ok: false,
             error: `create_dir was called with a file-looking path (${args.path}). Use <write_file path="${args.path}">...</write_file> to create the file instead.`,
+            pathLooksLikeFile: true,
+          };
+        }
+        const knownTodoFilePaths = Array.isArray(args.knownTodoFilePaths) ? args.knownTodoFilePaths.map(String) : [];
+        if (knownTodoFilePaths.includes(String(args.path)) || knownTodoFilePaths.includes(check.resolved)) {
+          return {
+            ok: false,
+            error: `create_dir was called for a known file todo (${args.path}). Use <write_file path="${args.path}">...</write_file> to create the file instead.`,
             pathLooksLikeFile: true,
           };
         }
@@ -366,8 +756,17 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
       case 'delete_file': {
         const check = resolveSafe(workspace, args.path);
         if (!check.ok) return { ok: false, error: check.error };
+        let before = null;
+        try { before = await snapshotFile(check.resolved); } catch {}
         await fs.unlink(check.resolved);
-        return { ok: true, result: `Deleted ${check.resolved}` };
+        return {
+          ok: true,
+          result: `Deleted ${check.resolved}`,
+          beforeHash: before?.hash || null,
+          beforeBytes: before?.bytes || 0,
+          beforeMtimeMs: before?.mtimeMs || null,
+          changed: true,
+        };
       }
 
       case 'run_shell': {
@@ -439,6 +838,32 @@ ipcMain.handle('agent:verify-files', async (event, { paths, workspace }) => {
     }
   }
   return { ok: true, results };
+});
+
+ipcMain.handle('agent:verify-todos', async (event, { todos, workspace }) => {
+  const paths = [...new Set((todos || []).map(todo => todo && todo.path).filter(Boolean))];
+  if (paths.length === 0) return { ok: true, results: [] };
+  const results = [];
+  for (const p of paths) {
+    const check = resolveSafe(workspace, p);
+    if (!check.ok) {
+      results.push({ path: p, ok: false, error: check.error });
+      continue;
+    }
+    try {
+      const snap = await snapshotFile(check.resolved);
+      results.push({
+        path: p,
+        ok: Boolean(snap.isFile && snap.bytes > 0),
+        bytes: snap.bytes,
+        hash: snap.hash || null,
+        error: snap.isFile && snap.bytes > 0 ? null : 'target is not a non-empty file',
+      });
+    } catch (err) {
+      results.push({ path: p, ok: false, error: err.message });
+    }
+  }
+  return { ok: results.every(item => item.ok), results };
 });
 
 async function verifyFrontendFile(htmlPath) {

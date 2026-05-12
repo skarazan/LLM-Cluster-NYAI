@@ -7,6 +7,8 @@ const {
   registerWorker,
   deregisterWorker,
   refreshHeartbeat,
+  markJobHeartbeat,
+  getJobStatus,
   pollForJob,
   submitJobResult,
   emitChunk,
@@ -39,6 +41,14 @@ router.post('/heartbeat', (req, res) => {
   res.json({ ok: true });
 });
 
+router.post('/job-heartbeat', (req, res) => {
+  const { workerId, jobId, stage } = req.body || {};
+  if (!workerId || !jobId) return res.status(400).json({ error: 'Missing workerId or jobId' });
+  const ok = markJobHeartbeat(jobId, workerId, stage || 'running');
+  if (!ok) return res.status(404).json({ error: 'Job not found' });
+  res.json({ ok: true, status: getJobStatus(jobId) });
+});
+
 // DELETE /workers/deregister — worker removes itself cleanly on shutdown
 router.delete('/deregister', (req, res) => {
   const { id } = req.body;
@@ -67,6 +77,12 @@ router.post('/result', (req, res) => {
   const ok = submitJobResult(jobId, result, error);
   if (!ok) return res.status(404).json({ error: 'Job not found or already timed out' });
   res.json({ ok: true });
+});
+
+router.get('/jobs/:jobId/status', (req, res) => {
+  const status = getJobStatus(req.params.jobId);
+  if (!status) return res.status(404).json({ error: 'Job not found' });
+  res.json({ ok: true, status });
 });
 
 module.exports = router;

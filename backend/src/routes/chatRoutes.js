@@ -14,6 +14,8 @@ router.post('/', async (req, res) => {
   }
 
   const tried = new Set();
+  let lastErrorMessage = '';
+  let lastErrorDetails = null;
   console.log(`[chat] request model=${model} workers=${require('../services/workerService').getAllWorkers().length}`);
 
   // Set up chunked response once, before the retry loop
@@ -41,9 +43,15 @@ router.post('/', async (req, res) => {
       removeChunkListener(jobId);
       decInflight(worker.id);
       console.log(`[chat] worker=${worker.name} error=${err.name}: ${err.message}`);
+      lastErrorMessage = err.message;
+      lastErrorDetails = err.payload || null;
       if (err.name === 'AbortError') {
         clearInterval(keepalive);
-        res.status(504).end(JSON.stringify({ error: err.message || `Worker ${worker.name} timed out` }));
+        res.status(504).end(JSON.stringify({
+          error: err.message || `Worker ${worker.name} timed out`,
+          jobId,
+          error_details: err.payload || { retryable: true, stage: 'manager_wait', jobId, status: 'timed_out' },
+        }));
         return;
       }
       tried.add(worker.id);
@@ -71,7 +79,11 @@ router.post('/', async (req, res) => {
   if (tried.size === 0) {
     return res.status(503).end(JSON.stringify({ error: 'No workers online' }));
   }
-  return res.status(502).end(JSON.stringify({ error: 'All workers failed', tried: [...tried] }));
+  return res.status(502).end(JSON.stringify({
+    error: lastErrorMessage ? `All workers failed: ${lastErrorMessage}` : 'All workers failed',
+    tried: [...tried],
+    error_details: lastErrorDetails,
+  }));
 });
 
 router.post('/cancel', (req, res) => {

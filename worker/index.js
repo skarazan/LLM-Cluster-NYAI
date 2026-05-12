@@ -153,6 +153,19 @@ async function sendHeartbeat(managerUrl, id) {
   }
 }
 
+async function sendJobHeartbeat(managerUrl, workerId, jobId, stage = 'running') {
+  try {
+    const res = await fetch(`${managerUrl}/workers/job-heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workerId, jobId, stage }),
+    });
+    if (!res.ok && res.status !== 404) console.warn(`[job-heartbeat] manager responded ${res.status}`);
+  } catch (err) {
+    console.warn(`[job-heartbeat] failed: ${err.message}`);
+  }
+}
+
 async function deregister(managerUrl, id) {
   try {
     await fetch(`${managerUrl}/workers/deregister`, {
@@ -250,7 +263,15 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   } catch (fetchErr) {
     clearTimeout(inferenceTimer);
     const reason = fetchErr.name === 'AbortError' ? 'timeout after 10 min' : fetchErr.message;
-    throw new Error(`[job] fetch to ${engine.type} failed: ${reason}`);
+    const err = new Error(`[job] fetch to ${engine.type} failed: ${reason}`);
+    err.payload = {
+      retryable: true,
+      stage: fetchErr.name === 'AbortError' ? 'inference_timeout' : 'inference_fetch',
+      jobId: job.id,
+      status: 'timed_out',
+      engine: engine.type,
+    };
+    throw err;
   } finally {
     clearTimeout(inferenceTimer);
   }
@@ -300,7 +321,9 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       };
     }
 
-    throw new Error(`${engine.type} HTTP ${res.status}: ${errBody.slice(0, 500)}`);
+    const err = new Error(`${engine.type} HTTP ${res.status}: ${errBody.slice(0, 500)}`);
+    err.payload = { retryable: res.status >= 500, stage: 'inference_http', jobId: job.id, status: 'failed', httpStatus: res.status };
+    throw err;
   }
 
   let content, toolCalls, tokens, finishReason = null;
@@ -385,7 +408,9 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     toolCalls = built.length ? built : null;
 
     if (sseErrors.length && !content && !toolCalls) {
-      throw new Error(`${engine.type} stream error: ${sseErrors.join(' | ').slice(0, 500)}`);
+      const err = new Error(`${engine.type} stream error: ${sseErrors.join(' | ').slice(0, 500)}`);
+      err.payload = { retryable: true, stage: 'inference_stream', jobId: job.id, status: 'failed' };
+      throw err;
     }
 
     if (toolCalls) {
@@ -527,6 +552,11 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
 
     let result = null;
     let error  = null;
+    let errorPayload = null;
+    let jobHeartbeatTimer = setInterval(() => {
+      sendJobHeartbeat(managerUrl, id, job.id, 'running').catch(() => {});
+    }, 10_000);
+    sendJobHeartbeat(managerUrl, id, job.id, 'running').catch(() => {});
     try {
       result = await runJob(job, engine, maxThreads, numCtx, onChunk);
       flushChunks();
@@ -534,10 +564,14 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
     } catch (err) {
       flushChunks();
       error = err.message;
+      errorPayload = err.payload || { retryable: true, stage: 'worker', jobId: job.id, status: 'failed' };
       console.error(`[job] failed jobId=${job.id}: ${err.message}`);
+    } finally {
+      clearInterval(jobHeartbeatTimer);
     }
 
-    await submitResultWithRetry(managerUrl, job.id, result, error);
+    await sendJobHeartbeat(managerUrl, id, job.id, 'result_submitting');
+    await submitResultWithRetry(managerUrl, job.id, result, errorPayload || error);
   }
 }
 
