@@ -87,6 +87,7 @@ function applyMode(mode) {
     codeControls.classList.remove('hidden');
     updateWorkspaceLabel();
     approvalSel.value = localStorage.getItem(APPROVAL_KEY) || 'strict';
+    planModeCheck.checked = false;
   }
 }
 

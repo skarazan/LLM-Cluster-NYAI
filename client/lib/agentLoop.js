@@ -42,7 +42,9 @@ async function requestPlan(opts) {
     {
       role: 'system',
       content: `You are a coding assistant planning a task. The workspace is "${workspace}".
-Create a concise, numbered plan for the task below. List each file to create/modify and what it will contain. Do NOT write any code — just the plan. Keep it brief.`,
+Create a concise file manifest for the task below. Only list concrete files to create or edit, max 6 items.
+Format each item as: N. path/to/file.ext — one short purpose.
+Do NOT list feature substeps, UI behavior checklists, state variables, or implementation details. Do NOT write code.`,
     },
     { role: 'user', content: userTask },
   ];
@@ -146,6 +148,7 @@ async function runAgentTurn(opts) {
 
   // ── Plan Phase (only when toggled on) ───────────────────────────────
   let approvedPlan = null;
+  let executionPlan = null;
   if (planMode) {
     appendBubble('assistant', 'Creating plan…');
     const planText = await requestPlan(opts);
@@ -162,6 +165,7 @@ async function runAgentTurn(opts) {
     }
 
     approvedPlan = decision.startsWith('edit:') ? decision.slice(5) : planText;
+    executionPlan = sanitizePlanForExecution(approvedPlan, messages, workspace);
     appendBubble('assistant', '✓ Plan approved. Executing…');
   }
 
@@ -177,7 +181,7 @@ async function runAgentTurn(opts) {
     const ctx = await ipcRenderer.invoke('agent:get-project-context', { workspace });
     if (ctx.ok) projectContext = ctx;
   } catch {}
-  const freshTodos = createTaskTodoList(messages, approvedPlan, workspace);
+  const freshTodos = createTaskTodoList(messages, executionPlan || approvedPlan, workspace);
   const taskTodos = pruneTodoListForFileWork(
     mergeTodoState({ items: agentState.todos?.length ? agentState.todos : todoState?.items }, freshTodos),
     workspace,
@@ -191,13 +195,12 @@ async function runAgentTurn(opts) {
   };
   await persistAgentState();
   const failureFingerprints = new Map(Object.entries(agentState.actionFingerprints?.failures || {}));
-  const toolCallNames = tools.filter(t => {
-    const n = t.function?.name || t.name;
-    return !TEXT_WRITE_TOOLS.has(n);
-  }).map(t => t.function?.name || t.name).join(', ');
+  const toolCallNames = selectToolsForPhase(tools, taskTodos)
+    .map(t => t.function?.name || t.name)
+    .join(', ');
   const systemMsg = {
     role: 'system',
-    content: `You are LLM Cluster Code Agent. The app state is the source of truth; your memory may be incomplete after compression. Tool calls: ${toolCallNames}. File writing: use <write_file> and <append_file> XML tags (see rules below).
+    content: `You are Code Agent. The app state is the source of truth; your memory may be incomplete after compression. Tool calls: ${toolCallNames}. File writing: use <write_file> and <append_file> XML tags (see rules below).
 
 WORKSPACE = "${workspace}"
 
@@ -206,20 +209,18 @@ CRITICAL PATH RULES — NEVER violate:
 - list_dir root = "${workspace}" — call it as: list_dir({"path": "${workspace}"})
 - read_file example: read_file({"path": "${workspace}/src/index.js"})
 - A capped read_file result is only a preview. It does NOT mean the file is incomplete.
-- write_file example: <write_file path="${workspace}/src/newfile.js">content here</write_file>
+- For file writing, start with <write_file path="${workspace}/src/newfile.js">, then write the complete source code, then close with </write_file>.
 - NEVER pass "undefined", "null", "", ".", or any relative path as a path argument
 - NEVER guess or omit the workspace prefix
 
 FILE WRITING — use XML tags, NOT tool calls:
-- To create/write a file, output: <write_file path="${workspace}/path/to/file">content here</write_file>
-- To append to a file, output: <append_file path="${workspace}/path/to/file">content here</append_file>
-- Safer alternative for large files:
-  <<<FILE path="${workspace}/path/to/file" mode="write">
-  content here
-  <<<END_FILE
+- To create/write a file, start the response with <write_file path="ABSOLUTE_FILE_PATH"> and put complete real source code before the closing tag.
+- To append to a file, start the response with <append_file path="ABSOLUTE_FILE_PATH"> and put complete real source code before the closing tag.
+- Safer alternative for large files: start with <<<FILE path="${workspace}/path/to/file" mode="write">, then write the complete real source code, then close with <<<END_FILE.
 - For appends use mode="append".
 - For files over 80 lines: use <write_file> for first 80 lines, then <append_file> for rest.
 - The content goes BETWEEN the tags as raw text. No JSON escaping needed.
+- The content between file tags must be the complete real file. Never write literal placeholders like "content here", "full file content here", "...", or "TODO".
 - You can use double quotes freely inside the tags.
 - Do NOT use write_file or append_file as tool calls — ONLY as XML tags in your response text.
 - NEVER use run_shell to write files (no cat >, echo >, heredoc, tee, etc). ONLY <write_file> tags.
@@ -241,7 +242,9 @@ WORKFLOW RULES:
 8. Do not repeat successful completed operations. Re-read only when needed to edit or verify current file state.
 9. A todo is done only when its file exists or the relevant operation actually changed something. "Directory already exists" is not progress on a file todo.
 10. create_dir is unavailable. Parent directories are created automatically by <write_file>. If a folder exists, move on to writing the next file.
-${approvedPlan ? `\nAPPROVED PLAN — execute this exactly:\n${approvedPlan}` : ''}
+11. If you attempt to do a tool call and you get an error, do not try it again, analyze the error/debug client program sends to you and figure out what you need to fix in your approach
+12. run_shell is unavailable while file todos are pending. Write files first; verification commands come after.
+${executionPlan ? `\nAPPROVED FILE MANIFEST — only use this to choose file targets, not as a feature checklist:\n${executionPlan}` : ''}
 ${formatTodoListForPrompt(taskTodos)}
 ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''}
 `,
@@ -384,10 +387,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
 
     // Send to backend — filter out file-body tools. Large source code is
     // streamed as text and written locally, never as llama.cpp tool-call JSON.
-    const filteredTools = forceTextWriteOnly ? [] : tools.filter(t => {
-      const name = t.function?.name || t.name;
-      return !TEXT_WRITE_TOOLS.has(name);
-    });
+    const filteredTools = forceTextWriteOnly ? [] : selectToolsForPhase(tools, taskTodos);
     const outgoingMessages = injectAgentStateReplay(
       injectTodoStatus(
         sanitizeHistoryForTools(await trimHistory(history), filteredTools),
@@ -674,15 +674,17 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
           break;
         }
         if (repeatedPlain >= 2) {
+          if (getPendingTodos(taskTodos).some(todo => todo.path)) forceTextWriteOnly = true;
           history.push({
             role: 'user',
             content: buildRepeatedPlainNudge(resp, taskTodos, workspace),
           });
           continue;
         }
+        if (getPendingTodos(taskTodos).some(todo => todo.path)) forceTextWriteOnly = true;
         history.push({
           role: 'user',
-          content: buildContinuationNudge(taskTodos, workspace),
+          content: buildFileFirstNudge(taskTodos, workspace),
         });
         continue;
       }
@@ -754,6 +756,24 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
           role: 'user',
           content: `${error}\nNext file todo: ${first ? `${first.title}${first.path ? ` (${first.path})` : ''}` : 'unknown'}\nEmit a complete <write_file> block for that file now. Do not call create_dir. Do not narrate.`,
         });
+        break;
+      }
+      if (toolName === 'run_shell' && getPendingTodos(taskTodos).some(todo => todo.path)) {
+        const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+        const error = 'run_shell is disabled while file todos are pending. The app creates parent directories automatically when writing files.';
+        addActivity({
+          kind: 'shell',
+          status: 'error',
+          title: 'Blocked run_shell',
+          subtitle: args.cmd || first?.path || '',
+          detail: { tool: toolName, path: args.cwd || '', command: [args.cmd, ...(args.args || [])].join(' '), status: 'blocked', error },
+        });
+        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error }) });
+        history.push({
+          role: 'user',
+          content: `${error}\nNext file todo: ${first ? `${first.title}${first.path ? ` (${first.path})` : ''}` : 'unknown'}\nEmit a complete <write_file> block for that file now. Do not call shell commands. Do not narrate.`,
+        });
+        forceTextWriteOnly = true;
         break;
       }
       const toolDef  = getTool(toolName);
@@ -917,6 +937,27 @@ function redactSuspiciousToolOutput(toolResult) {
     return value;
   };
   return scrub(copy);
+}
+
+function selectToolsForPhase(tools, todos) {
+  const pendingFileTodos = getPendingTodos(todos).some(todo => todo.path);
+  const allowedWhileWriting = new Set([
+    'read_file',
+    'read_many_files',
+    'file_state',
+    'inspect_project',
+    'list_dir',
+    'glob',
+    'grep',
+    'edit_file',
+    'replace_file_range',
+  ]);
+  return tools.filter(tool => {
+    const name = tool.function?.name || tool.name;
+    if (TEXT_WRITE_TOOLS.has(name) || DISABLED_MODEL_TOOLS.has(name)) return false;
+    if (pendingFileTodos && !allowedWhileWriting.has(name)) return false;
+    return true;
+  });
 }
 
 function normalizeAgentState(state, workspace) {
@@ -1257,6 +1298,33 @@ function inferCodeBlockFilename(text, match, history = []) {
 
 function looksLikeSourcePath(pathLike) {
   return /\.(html?|css|js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|json|yaml|yml|md|txt|sh|env|toml|xml|svg)$/i.test(pathLike);
+}
+
+function sanitizePlanForExecution(planText, messages, workspace) {
+  const source = String(planText || '');
+  const paths = [];
+  const seen = new Set();
+  const addPath = raw => {
+    const normalized = normalizeTodoPath(String(raw || '').replace(/[.,;:]+$/, ''), workspace);
+    if (!looksLikeSourcePath(normalized) || seen.has(normalized)) return;
+    seen.add(normalized);
+    paths.push(normalized);
+  };
+
+  const pathRe = /(?:^|[\s"'`(])((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))/gi;
+  for (const match of source.matchAll(pathRe)) addPath(match[1]);
+
+  const taskText = messages.map(m => m.content || '').join('\n');
+  if (paths.length === 0 && /website|web app|clone|simulator|html|css|javascript|frontend/i.test(taskText + '\n' + source)) {
+    addPath(`${workspace}/index.html`);
+    addPath(`${workspace}/style.css`);
+    addPath(`${workspace}/script.js`);
+  }
+  if (/tailwind/i.test(taskText + '\n' + source) && !paths.some(p => /tailwind\.config|\.css$/i.test(p))) {
+    addPath(`${workspace}/style.css`);
+  }
+  if (paths.length === 0) return '';
+  return paths.slice(0, 8).map((path, index) => `${index + 1}. ${path} — create or update this file`).join('\n');
 }
 
 function createTaskTodoList(messages, approvedPlan, workspace) {
@@ -1702,6 +1770,19 @@ Do not narrate progress only. Emit exactly one useful next action:
 - "Done." only if every todo is complete and verification passes.`;
 }
 
+function buildFileFirstNudge(todos, workspace) {
+  const first = getPendingTodos(todos).find(todo => todo.path) || getPendingTodos(todos)[0];
+  if (!first?.path) return buildContinuationNudge(todos, workspace);
+  return `Your previous response only narrated progress. For the next response, tools are disabled.
+Start your response with this exact opening tag:
+<write_file path="${first.path}">
+Then immediately write the complete real source code for ${shortPath(first.path)}.
+End with this exact closing tag:
+</write_file>
+
+No markdown fences. No explanation. No shell commands. No directory creation. The block body must be real working code, not instructional or placeholder text. If this file already exists and should not be overwritten, output a complete <write_file> replacement only after preserving the intended functionality.`;
+}
+
 function buildRepeatedPlainNudge(text, todos, workspace) {
   const first = getPendingTodos(todos)[0];
   const target = first?.path || '';
@@ -1712,8 +1793,8 @@ function buildRepeatedPlainNudge(text, todos, workspace) {
 First unfinished todo: ${first ? `${first.title}${target ? ` (${target})` : ''}` : 'unknown'}
 Valid next output:
 - a complete <write_file path="${target || `${workspace}/filename.ext`}">...</write_file> block, or
-- a necessary read/list/edit/run tool call.
-Do not call create_dir for filenames with extensions. Do not say Done.`;
+- a necessary read/list/edit tool call only if you need current file content.
+Do not call run_shell or create_dir while file todos are pending. Do not say Done.`;
 }
 
 function isTruncatedFinish(reason) {

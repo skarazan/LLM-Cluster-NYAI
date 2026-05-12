@@ -170,6 +170,56 @@ function renderProjectContext(ctx) {
   return parts.join('\n\n');
 }
 
+function splitCommandLine(input) {
+  const out = [];
+  let current = '';
+  let quote = null;
+  let escaped = false;
+  for (const ch of String(input || '')) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        out.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+function normalizeShellInvocation(args) {
+  let cmd = String(args.cmd || '').trim();
+  let safeArgs = Array.isArray(args.args) ? args.args.map(a => String(a)) : [];
+  if (cmd && safeArgs.length === 0 && /\s/.test(cmd)) {
+    const parts = splitCommandLine(cmd);
+    if (parts.length > 0) {
+      cmd = parts[0];
+      safeArgs = parts.slice(1);
+    }
+  }
+  return { cmd, args: safeArgs };
+}
+
 // --- Update check: compare current version against latest GitHub release ---
 async function checkForUpdates() {
   try {
@@ -770,14 +820,30 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
       }
 
       case 'run_shell': {
-        const shellCheck = checkShellCommand(args.cmd, args.args || []);
+        const normalized = normalizeShellInvocation(args);
+        if (!normalized.cmd) return { ok: false, error: 'run_shell requires a command' };
+        const shellCheck = checkShellCommand(normalized.cmd, normalized.args || []);
         if (!shellCheck.ok) return { ok: false, error: shellCheck.error };
         const cwdCheck = resolveSafe(workspace, args.cwd || '.');
         if (!cwdCheck.ok) return { ok: false, error: cwdCheck.error };
+        if (normalized.cmd === 'mkdir' && normalized.args[0] === '-p' && normalized.args.length === 2) {
+          const dirCheck = resolveSafe(workspace, normalized.args[1]);
+          if (!dirCheck.ok) return { ok: false, error: dirCheck.error };
+          if (FILE_LIKE_EXTENSION_RE.test(path.basename(dirCheck.resolved))) {
+            return { ok: false, error: `mkdir -p target looks like a file path (${normalized.args[1]}). Use <write_file> instead.` };
+          }
+          await fs.mkdir(dirCheck.resolved, { recursive: true });
+          return {
+            ok: true,
+            result: { stdout: `Created directory: ${dirCheck.resolved}\n`, stderr: '', exitCode: 0 },
+            normalizedCommand: normalized,
+            changed: true,
+          };
+        }
         const timeout = args.timeout_ms || 30000;
-        const safeArgs = (args.args || []).map(a => String(a));
+        const safeArgs = normalized.args;
         const output  = await new Promise((resolve, reject) => {
-          cp.execFile(args.cmd, safeArgs, {
+          cp.execFile(normalized.cmd, safeArgs, {
             cwd: cwdCheck.resolved,
             timeout,
             maxBuffer: 1_000_000,
@@ -787,7 +853,7 @@ ipcMain.handle('agent:run-tool', async (event, { tool, args, workspace }) => {
             resolve({ stdout: (stdout || '').slice(0, 100000), stderr: (stderr || '').slice(0, 10000), exitCode: err ? err.code : 0 });
           });
         });
-        return { ok: true, result: output };
+        return { ok: true, result: output, normalizedCommand: normalized };
       }
 
       default:
