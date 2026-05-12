@@ -226,6 +226,7 @@ FILE WRITING — use XML tags, NOT tool calls:
 - NEVER use run_shell to write files (no cat >, echo >, heredoc, tee, etc). ONLY <write_file> tags.
 - Use edit_file for small exact replacements.
 - Use replace_file_range after read_file when exact-string editing is brittle.
+- NEVER call edit_file or replace_file_range to create a new file. If the target file does not exist yet, create it with <write_file> first.
 - Before editing/overwriting an existing file you did not just create in this session, call read_file with limit=5000 so the app can check stale writes.
 - NEVER output placeholder paths like "/file", "path/to/file", or "/absolute/path/to/file". Use the actual absolute target path.
 - NEVER call create_dir for a file path like script.js, style.css, index.html, README.md, or anything with a file extension. Use <write_file> for files.
@@ -388,6 +389,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
     // Send to backend — filter out file-body tools. Large source code is
     // streamed as text and written locally, never as llama.cpp tool-call JSON.
     const filteredTools = forceTextWriteOnly ? [] : selectToolsForPhase(tools, taskTodos);
+    const activeToolNames = new Set(filteredTools.map(tool => tool.function?.name || tool.name).filter(Boolean));
     const outgoingMessages = injectAgentStateReplay(
       injectTodoStatus(
         sanitizeHistoryForTools(await trimHistory(history), filteredTools),
@@ -739,6 +741,26 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
       } else {
         args = rawArgs;
       }
+      if (!activeToolNames.has(toolName)) {
+        const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+        const error = `Tool "${toolName}" is not enabled for the current phase.`;
+        addActivity({
+          kind: activityKindForTool(toolName),
+          status: 'error',
+          title: `Blocked ${toolName}`,
+          subtitle: args.path || first?.path || '',
+          detail: { tool: toolName, path: args.path || '', status: 'blocked', error },
+        });
+        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error }) });
+        if (first?.path) {
+          history.push({
+            role: 'user',
+            content: `${error}\nNext file todo: ${first.title} (${first.path})\nEmit a complete <write_file path="${first.path}"> block for that file now. Do not narrate.`,
+          });
+          forceTextWriteOnly = true;
+        }
+        break;
+      }
       if (TEXT_WRITE_TOOLS.has(toolName)) {
         appendBubble('error', `Tool "${toolName}" is disabled as a native tool. Use <${toolName} path="...">...</${toolName}> text blocks instead.`);
         history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: `${toolName} is not available as a JSON tool because large file contents break llama.cpp parsing. Emit XML write blocks in assistant text instead.` }) });
@@ -779,6 +801,30 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
         });
         forceTextWriteOnly = true;
         break;
+      }
+      if (['edit_file', 'replace_file_range'].includes(toolName) && args.path) {
+        const fileState = await ipcRenderer.invoke('agent:get-file-state', { path: args.path, workspace });
+        if (!fileState.ok || !fileState.snapshot?.isFile) {
+          const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+          const error = `Cannot use ${toolName} on a missing/non-file path (${args.path}). Create it first with <write_file>.`;
+          if (args.path) markTodoFailed(taskTodos, args.path, error);
+          refreshTodoView();
+          addActivity({
+            kind: 'edit',
+            status: 'error',
+            title: `${toolName} failed: ${shortPath(args.path)}`,
+            subtitle: args.path,
+            detail: { tool: toolName, path: args.path, status: 'failed', error },
+          });
+          history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error, needsCreate: true }) });
+          history.push({
+            role: 'user',
+            content: `${error}\n${first?.path ? `Next file todo: ${first.title} (${first.path})` : 'Use the pending file target from todo state.'}\nNow emit one complete <write_file path="${args.path}"> block for the full file content. Do not call ${toolName}.`,
+          });
+          forceTextWriteOnly = true;
+          await persistAgentState();
+          break;
+        }
       }
       const toolDef  = getTool(toolName);
       const risk     = toolDef ? toolDef.risk : 'write';
@@ -953,8 +999,6 @@ function selectToolsForPhase(tools, todos) {
     'list_dir',
     'glob',
     'grep',
-    'edit_file',
-    'replace_file_range',
   ]);
   return tools.filter(tool => {
     const name = tool.function?.name || tool.name;
