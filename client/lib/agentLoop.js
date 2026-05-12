@@ -614,13 +614,13 @@ ${formatTodoListForPrompt(taskTodos)}
         continue;
       }
 
-      if (resp && shouldContinueAfterPlainResponse(resp, toolCallCount, plainContinuationCount)) {
+      if (resp && shouldContinueAfterPlainResponse(resp, toolCallCount, plainContinuationCount, taskTodos)) {
         plainContinuationCount++;
         appendBubble('assistant', resp, meta);
         history.push({ role: 'assistant', content: resp });
         history.push({
           role: 'user',
-          content: 'Continue executing the task now. Do not narrate progress only. Either emit the next tool call, emit <write_file>/<append_file> blocks for the next file, or say "Done." only if every requested file and step is complete.',
+          content: buildContinuationNudge(taskTodos, workspace),
         });
         continue;
       }
@@ -632,7 +632,10 @@ ${formatTodoListForPrompt(taskTodos)}
       ipcRenderer.removeListener('stream-chunk', onStreamChunk);
       if (todoState) todoState.items = taskTodos;
       // Strip the injected system message before returning — renderer stores clean history
-      return history.filter(m => !(m.role === 'system' && m.content.startsWith('You are a coding assistant')));
+      return history.filter(m => !(m.role === 'system' && (
+        m.content.startsWith('You are a coding assistant') ||
+        m.content.startsWith('You are LLM Cluster Code Agent')
+      )));
     }
 
     // Has tool calls — show approval cards and execute
@@ -1251,17 +1254,23 @@ async function verifyTodoFiles(todos, workspace) {
   return { ok: failed.length === 0, failed };
 }
 
-function shouldContinueAfterPlainResponse(text, toolCallCount, continuationCount) {
-  if (toolCallCount === 0 || continuationCount >= 3) return false;
+function shouldContinueAfterPlainResponse(text, toolCallCount, continuationCount, todos = []) {
+  const pending = getPendingTodos(todos);
+  const limit = pending.length > 0 ? 8 : 3;
+  if (continuationCount >= limit) return false;
 
   const normalized = text.toLowerCase().trim();
   if (!normalized || /\bdone\b|completed|finished|all files|task is complete/.test(normalized)) return false;
+  if (pending.length > 0) return true;
+  if (toolCallCount === 0) return false;
 
   const progressOnlyPatterns = [
     /\bnow let me\b/,
+    /\blet me start\b/,
     /\blet me (create|add|build|write|update|implement)\b/,
-    /\bi'?ll (create|add|build|write|update|implement|continue)\b/,
+    /\bi'?ll (start|create|add|build|write|update|implement|continue)\b/,
     /\bstarting (with|on)\b/,
+    /\bstart by (creating|adding|building|writing|updating|implementing)\b/,
     /\bnext,?\s+(i|let me|we)\b/,
     /\bcontinue (with|by|to)\b/,
     /\bremaining files?\b/,
@@ -1270,6 +1279,18 @@ function shouldContinueAfterPlainResponse(text, toolCallCount, continuationCount
   ];
 
   return progressOnlyPatterns.some(pattern => pattern.test(normalized));
+}
+
+function buildContinuationNudge(todos, workspace) {
+  const first = getPendingTodos(todos)[0];
+  const target = first
+    ? `\nFirst unfinished todo: ${first.title}${first.path ? ` (${first.path})` : ''}${first.error ? `\nCurrent error: ${first.error}` : ''}`
+    : '';
+  return `Continue executing the task now.${target}
+Do not narrate progress only. Emit exactly one useful next action:
+- a tool call to inspect/edit/run/verify, or
+- a complete <write_file>/<append_file> block under "${workspace}", or
+- "Done." only if every todo is complete and verification passes.`;
 }
 
 function isTruncatedFinish(reason) {
