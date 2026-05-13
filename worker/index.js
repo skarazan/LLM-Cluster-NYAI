@@ -187,19 +187,19 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   const isCodeAgent = job.agentMode === 'code';
   const sampling = {
     temperature: isCodeAgent
-      ? Number(process.env.LLM_CODE_TEMPERATURE || 0.35)
-      : Number(process.env.LLM_CHAT_TEMPERATURE || 0.65),
+      ? Number(process.env.LLM_CODE_TEMPERATURE || 0.6)
+      : Number(process.env.LLM_CHAT_TEMPERATURE || 0.7),
     topP: isCodeAgent
-      ? Number(process.env.LLM_CODE_TOP_P || 0.9)
+      ? Number(process.env.LLM_CODE_TOP_P || 0.95)
       : Number(process.env.LLM_CHAT_TOP_P || 0.9),
     topK: isCodeAgent
-      ? Number(process.env.LLM_CODE_TOP_K || 30)
+      ? Number(process.env.LLM_CODE_TOP_K || 40)
       : Number(process.env.LLM_CHAT_TOP_K || 40),
     presencePenalty: isCodeAgent
-      ? Number(process.env.LLM_CODE_PRESENCE_PENALTY || 0.4)
-      : Number(process.env.LLM_CHAT_PRESENCE_PENALTY || 0.2),
+      ? Number(process.env.LLM_CODE_PRESENCE_PENALTY || 0)
+      : Number(process.env.LLM_CHAT_PRESENCE_PENALTY || 0),
     repeatPenalty: isCodeAgent
-      ? Number(process.env.LLM_CODE_REPEAT_PENALTY || 1.15)
+      ? Number(process.env.LLM_CODE_REPEAT_PENALTY || 1.0)
       : Number(process.env.LLM_CHAT_REPEAT_PENALTY || 1.1),
   };
 
@@ -242,12 +242,10 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       body.tools = job.tools;
       body.tool_choice = 'auto';
     }
-    if (isCodeAgent || hasTools) {
-      // Qwen3 respects this via chat_template_kwargs. Keep it off for all
-      // agent steps, including text-only file blocks, so output tokens go to
-      // actions instead of hidden reasoning.
-      body.chat_template_kwargs = { enable_thinking: false };
-    }
+    // Qwen3 thinking: let the model reason before generating code.
+    // File writes use XML tags (not JSON tool calls), so thinking tokens
+    // no longer compete with tool call argument space.
+    // enable_thinking: true is the default — we just don't override it.
   } else {
     url = `${engine.url}/api/chat`;
     body = {
@@ -432,12 +430,12 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       const joined = sseErrors.join(' | ');
       console.error(`[stream] ${sseErrors.length} SSE error(s): ${joined}`);
       const contextShiftDisabled = /context shift is disabled/i.test(joined);
-      streamMeta = {
-        errors: sseErrors.slice(-3),
-        contextShiftDisabled,
-      };
-      if (contextShiftDisabled && !finishReason) finishReason = 'context_shift_disabled';
-    }
+        streamMeta = {
+          errors: sseErrors.slice(-3),
+          contextShiftDisabled,
+        };
+      if (contextShiftDisabled) finishReason = 'context_shift_disabled';
+      }
 
     content   = accumulated;
     const built = Object.values(toolCallsMap);

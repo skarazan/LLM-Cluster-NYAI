@@ -5,12 +5,130 @@ const { buildApprovalCard } = require('../renderer/components/approvalCard');
 const { getTool }       = require('./tools');
 
 const MAX_TOOL_CALLS = Infinity;
-const WRITE_CHUNK_CHARS = 6000;
+const WRITE_CHUNK_CHARS = 2500;
+const RUN_STATE_IDLE = 'idle';
+const RUN_STATE_PLANNING = 'planning';
+const RUN_STATE_EXECUTING = 'executing';
+const RUN_STATE_WAITING_TOOL = 'waiting_tool';
+const RUN_STATE_RECOVERING = 'recovering';
+const RUN_STATE_DONE = 'done';
+const RUN_STATE_STUCK = 'stuck';
+const RUN_STATE_TRANSITIONS = {
+  [RUN_STATE_IDLE]: new Set([RUN_STATE_IDLE, RUN_STATE_PLANNING, RUN_STATE_EXECUTING, RUN_STATE_STUCK, RUN_STATE_DONE]),
+  [RUN_STATE_PLANNING]: new Set([RUN_STATE_PLANNING, RUN_STATE_EXECUTING, RUN_STATE_IDLE, RUN_STATE_STUCK]),
+  [RUN_STATE_EXECUTING]: new Set([RUN_STATE_EXECUTING, RUN_STATE_PLANNING, RUN_STATE_WAITING_TOOL, RUN_STATE_RECOVERING, RUN_STATE_DONE, RUN_STATE_IDLE, RUN_STATE_STUCK]),
+  [RUN_STATE_WAITING_TOOL]: new Set([RUN_STATE_WAITING_TOOL, RUN_STATE_PLANNING, RUN_STATE_EXECUTING, RUN_STATE_RECOVERING, RUN_STATE_DONE, RUN_STATE_IDLE, RUN_STATE_STUCK]),
+  [RUN_STATE_RECOVERING]: new Set([RUN_STATE_RECOVERING, RUN_STATE_PLANNING, RUN_STATE_EXECUTING, RUN_STATE_WAITING_TOOL, RUN_STATE_DONE, RUN_STATE_IDLE, RUN_STATE_STUCK]),
+  [RUN_STATE_DONE]: new Set([RUN_STATE_DONE, RUN_STATE_IDLE, RUN_STATE_PLANNING, RUN_STATE_EXECUTING]),
+  [RUN_STATE_STUCK]: new Set([RUN_STATE_STUCK, RUN_STATE_IDLE, RUN_STATE_PLANNING, RUN_STATE_EXECUTING]),
+};
+const RUN_STATE_ALLOWED = new Set(Object.keys(RUN_STATE_TRANSITIONS));
 
 // Tools that can never be auto-approved or remembered
 const ALWAYS_CONFIRM = new Set(['delete_file', 'run_shell']);
 const TEXT_WRITE_TOOLS = new Set(['write_file', 'append_file']);
 const DISABLED_MODEL_TOOLS = new Set(['create_dir']);
+const MUTATION_TOOLS = new Set(['write_file', 'append_file', 'edit_file', 'replace_file_range', 'delete_file', 'create_dir']);
+
+function defaultRunState(workspace, sessionId) {
+  const now = new Date().toISOString();
+  return {
+    status: RUN_STATE_IDLE,
+    workspace,
+    sessionId: sessionId || '',
+    enteredAt: now,
+    updatedAt: now,
+    lastReason: 'initialized',
+    transitionCount: 0,
+    progressCount: 0,
+    lastProgressAt: null,
+    lastProgressReason: '',
+    lastToolName: '',
+    inspectWithoutProgress: 0,
+    history: [],
+    error: null,
+  };
+}
+
+function normalizeRunState(state, workspace, sessionId) {
+  const base = defaultRunState(workspace, sessionId);
+  const merged = {
+    ...base,
+    ...(state && typeof state === 'object' ? state : {}),
+    workspace,
+    sessionId: sessionId || state?.sessionId || base.sessionId,
+  };
+  if (!RUN_STATE_ALLOWED.has(merged.status)) merged.status = RUN_STATE_IDLE;
+  merged.transitionCount = Number.isFinite(merged.transitionCount) ? merged.transitionCount : 0;
+  merged.progressCount = Number.isFinite(merged.progressCount) ? merged.progressCount : 0;
+  merged.inspectWithoutProgress = Number.isFinite(merged.inspectWithoutProgress) ? merged.inspectWithoutProgress : 0;
+  merged.history = Array.isArray(merged.history) ? merged.history.slice(-80) : [];
+  return merged;
+}
+
+function transitionRunState(runState, nextStatus, reason, meta = {}) {
+  const now = new Date().toISOString();
+  const current = normalizeRunState(runState, runState?.workspace || meta.workspace || '', runState?.sessionId || meta.sessionId || '');
+  const allowed = RUN_STATE_TRANSITIONS[current.status] || new Set();
+  if (!allowed.has(nextStatus)) {
+    const illegalReason = `Illegal run-state transition ${current.status} -> ${nextStatus}${reason ? ` (${reason})` : ''}`;
+    const illegalHistory = [...current.history, { from: current.status, to: RUN_STATE_STUCK, reason: illegalReason, at: now }].slice(-80);
+    return {
+      ok: false,
+      state: {
+        ...current,
+        status: RUN_STATE_STUCK,
+        enteredAt: now,
+        updatedAt: now,
+        lastReason: illegalReason,
+        transitionCount: current.transitionCount + 1,
+        history: illegalHistory,
+        error: illegalReason,
+      },
+      error: illegalReason,
+    };
+  }
+  if (current.status === nextStatus) {
+    return {
+      ok: true,
+      state: {
+        ...current,
+        updatedAt: now,
+        lastReason: reason || current.lastReason,
+        lastToolName: meta.lastToolName || current.lastToolName,
+      },
+    };
+  }
+  const history = [...current.history, { from: current.status, to: nextStatus, reason: reason || '', at: now }].slice(-80);
+  return {
+    ok: true,
+    state: {
+      ...current,
+      status: nextStatus,
+      enteredAt: now,
+      updatedAt: now,
+      lastReason: reason || current.lastReason,
+      transitionCount: current.transitionCount + 1,
+      history,
+      error: nextStatus === RUN_STATE_STUCK ? (reason || current.error || 'Agent entered stuck state') : null,
+      lastToolName: meta.lastToolName || current.lastToolName,
+    },
+  };
+}
+
+function markRunProgress(runState, reason, meta = {}) {
+  const now = new Date().toISOString();
+  const current = normalizeRunState(runState, runState?.workspace || '', runState?.sessionId || '');
+  return {
+    ...current,
+    updatedAt: now,
+    progressCount: current.progressCount + 1,
+    lastProgressAt: now,
+    lastProgressReason: reason || current.lastProgressReason || '',
+    inspectWithoutProgress: 0,
+    lastToolName: meta.lastToolName || current.lastToolName,
+  };
+}
 
 /**
  * Run one full agent turn.
@@ -34,17 +152,70 @@ const DISABLED_MODEL_TOOLS = new Set(['create_dir']);
  * or null if user rejects / aborts.
  */
 async function requestPlan(opts) {
-  const { backendUrl, messages, model, workspace, chat, appendBubble, setLoading, abortRef, requestId } = opts;
+  const {
+    backendUrl, messages, model, workspace, chat, appendBubble, setLoading, abortRef, requestId,
+    priorPlanText = '', currentTodos = [], planIntent = 'new',
+  } = opts;
 
   const userTask = messages[messages.length - 1]?.content || '';
+  const taskHint = String(userTask || '').toLowerCase();
+  const frontendOnly = /\b(html|css|javascript|js|frontend|website|web app|clone|copycat|localstorage|payment)\b/.test(taskHint)
+    && !/\b(api|backend|server|express|database|postgres|mysql|mongodb)\b/.test(taskHint);
+  const complexTask = /\b(full|complete|production|simulated payment|auth|checkout|dashboard|clone|copycat|multi[- ]page|component|state|cart)\b/i.test(userTask);
+  const minPlanSteps = complexTask ? 10 : 6;
+  const minFiles = complexTask ? 8 : 5;
+  const maxFiles = complexTask ? 18 : 10;
+  const minTodos = complexTask ? 10 : 6;
+  const existingTodoLines = (currentTodos || [])
+    .map(t => `- [${t.status}] ${t.title}${t.path ? ` (${t.path})` : ''}`)
+    .slice(0, 24)
+    .join('\n');
+  const priorPlan = String(priorPlanText || '').trim();
+  const intentLine = planIntent === 'update'
+    ? 'You are revising an existing plan based on a new user request. Keep what still applies, drop what does not, and add missing work.'
+    : 'You are creating a new implementation plan.';
   const planMessages = [
     {
       role: 'system',
       content: `You are a coding assistant planning a task. The workspace is "${workspace}".
-Create a concise file manifest for the task below. Only list concrete files to create or edit, max 6 items.
-Format each item as: N. path/to/file.ext — one short purpose.
-Do NOT list feature substeps, UI behavior checklists, state variables, or implementation details. Do NOT write code.`,
+${intentLine}
+
+Output format (exact section headers):
+## Goal
+<1-3 sentences>
+
+## Implementation Plan
+<ordered steps; meaningful detail is required>
+Rules for Implementation Plan:
+- Include at least ${minPlanSteps} ordered steps unless the user explicitly asked for a tiny/single-file change.
+- Include execution order, dependencies, and verification steps.
+
+## File Manifest
+<numbered list of concrete file paths with one-line purpose>
+Rules for File Manifest:
+- Include between ${minFiles} and ${maxFiles} files unless task is explicitly tiny.
+- Every file path must be absolute and must start with "${workspace}/"
+- Do not include URL paths or CDN links as file paths.
+- Prefer concrete app files over generic placeholders.
+- If user asked for frontend/static app only, do not include backend/server/database files.
+
+## Todos
+<numbered actionable checklist aligned to the file manifest and verification>
+Rules for Todos:
+- Include one item per meaningful file or verification step.
+- Use clear action verbs.
+- Include at least ${minTodos} items unless task is explicitly tiny.
+- No code blocks.
+
+${frontendOnly ? `FRONTEND-ONLY SCOPE (STRICT):
+- The user asked for frontend/web output.
+- Do NOT include backend/server/api/database files or todos.
+- Keep file paths under "${workspace}/" and focus on UI, styling, client logic, mock data, localStorage, and simulated flows.` : ''}
+
+Do NOT output source code. Do NOT call tools.`,
     },
+    ...(priorPlan ? [{ role: 'user', content: `Current plan snapshot:\n${priorPlan}` }] : []),
+    ...(existingTodoLines ? [{ role: 'user', content: `Current todo state:\n${existingTodoLines}` }] : []),
     { role: 'user', content: userTask },
   ];
 
@@ -141,122 +312,205 @@ async function runAgentTurn(opts) {
     if (typeof appendActivity === 'function') return appendActivity(activity);
     return appendBubble(activity.status === 'error' ? 'error' : 'assistant', activity.title || activity.subtitle || 'Activity');
   };
+  const latestUserPrompt = getLatestUserPrompt(messages);
+  const hasContinuationIntent = isContinuationPrompt(latestUserPrompt);
+  const hasPlanUpdateIntent = isPlanUpdatePrompt(latestUserPrompt);
+  const isFreshTaskPrompt = shouldResetTaskStateFromPrompt(latestUserPrompt, hasContinuationIntent);
+  let shouldStopAgent = false;
+  let taskTodos = [];
   const refreshTodoView = () => {
     if (typeof updateTodoView === 'function') updateTodoView(formatTodoListForDisplay(taskTodos));
   };
 
-  // ── Plan Phase (only when toggled on) ───────────────────────────────
-  let approvedPlan = null;
-  let executionPlan = null;
-  if (planMode) {
-    appendBubble('assistant', 'Creating plan…');
-    const planText = await requestPlan(opts);
-
-    if (!planText || abortRef.aborted) {
-      appendBubble('error', 'Failed to generate plan.');
-      return messages;
-    }
-
-    const decision = await showPlanApproval(chat, planText);
-    if (decision === 'reject') {
-      appendBubble('error', 'Plan rejected.');
-      return messages;
-    }
-
-    approvedPlan = decision.startsWith('edit:') ? decision.slice(5) : planText;
-    executionPlan = sanitizePlanForExecution(approvedPlan, messages, workspace);
-    appendBubble('assistant', '✓ Plan approved. Executing…');
-  }
-
-  // ── Execution Phase ─────────────────────────────────────────────────
+  // ── Load persisted app-owned state first (source of truth) ─────────
   let history = [...messages];
   let agentState = normalizeAgentState(null, workspace);
-  let projectContext = null;
+  let sessionMismatch = false;
   try {
     const loaded = await ipcRenderer.invoke('agent:load-state', { workspace });
     if (loaded.ok) {
       const loadedState = normalizeAgentState(loaded.state, workspace);
       if (sessionId && loadedState.sessionId && loadedState.sessionId !== sessionId) {
+        sessionMismatch = true;
         agentState = normalizeAgentState({ sessionId }, workspace);
       } else {
         agentState = loadedState;
       }
     }
   } catch {}
-  try {
-    const ctx = await ipcRenderer.invoke('agent:get-project-context', { workspace });
-    if (ctx.ok) projectContext = ctx;
-  } catch {}
-  const freshTodos = createTaskTodoList(messages, executionPlan || approvedPlan, workspace);
-  const taskTodos = pruneTodoListForFileWork(
-    mergeTodoState({ items: agentState.todos?.length ? agentState.todos : todoState?.items }, freshTodos),
-    workspace,
-  );
-  agentState.todos = taskTodos;
-  if (todoState) todoState.items = taskTodos;
+  if (Array.isArray(agentState.todos) && agentState.todos.length) {
+    taskTodos = agentState.todos;
+  } else if (!sessionMismatch && Array.isArray(todoState?.items) && todoState.items.length) {
+    taskTodos = todoState.items;
+  } else if (sessionMismatch && todoState && Array.isArray(todoState.items)) {
+    todoState.items = [];
+  }
+
+  // If the user started a fresh request (not a continue/resume/fix follow-up),
+  // do not carry forward stale todo/read/file state from prior runs.
+  if (isFreshTaskPrompt) {
+    taskTodos = [];
+    agentState.todos = [];
+    agentState.fileHistory = [];
+    agentState.readState = {};
+    agentState.lastApprovedPlan = '';
+    agentState.actionFingerprints = {};
+    agentState.runState = normalizeRunState({
+      ...defaultRunState(workspace, sessionId || agentState.sessionId),
+      lastReason: 'new_task_prompt_reset',
+    }, workspace, sessionId || agentState.sessionId);
+    if (todoState && Array.isArray(todoState.items)) todoState.items = [];
+  }
+
   const persistAgentState = async () => {
     if (sessionId) agentState.sessionId = sessionId;
+    agentState.runState = normalizeRunState(agentState.runState, workspace, agentState.sessionId);
     agentState.todos = taskTodos;
     agentState.updatedAt = new Date().toISOString();
     try { await ipcRenderer.invoke('agent:save-state', { workspace, state: agentState }); } catch {}
   };
+
+  const updateRunState = async (nextStatus, reason, meta = {}) => {
+    const transition = transitionRunState(
+      normalizeRunState(agentState.runState, workspace, agentState.sessionId),
+      nextStatus,
+      reason,
+      { ...meta, workspace, sessionId: agentState.sessionId },
+    );
+    agentState.runState = transition.state;
+    await persistAgentState();
+    if (!transition.ok) {
+      addActivity({
+        kind: 'info',
+        status: 'error',
+        title: 'Invalid run transition',
+        subtitle: `${transition.state.status}`,
+        detail: { status: transition.state.status, error: transition.error, reason, nextStatus },
+      });
+      appendBubble('error', transition.error || 'Agent entered an invalid run state.');
+      shouldStopAgent = true;
+      return false;
+    }
+    return true;
+  };
+
+  const markProgress = async (reason, meta = {}) => {
+    agentState.runState = markRunProgress(
+      normalizeRunState(agentState.runState, workspace, agentState.sessionId),
+      reason,
+      meta,
+    );
+    await persistAgentState();
+  };
+
+  // ── Plan Phase (only when toggled on) ───────────────────────────────
+  let approvedPlan = null;
+  let executionPlan = null;
+  const shouldRunPlanPhase = Boolean(planMode && (isFreshTaskPrompt || hasPlanUpdateIntent || taskTodos.length === 0));
+  if (!(await updateRunState(shouldRunPlanPhase ? RUN_STATE_PLANNING : RUN_STATE_EXECUTING, shouldRunPlanPhase ? 'plan_phase_started' : 'execution_started', { requestId }))) {
+    return history;
+  }
+  if (shouldRunPlanPhase) {
+    appendBubble('assistant', 'Creating plan…');
+    const priorPlanText = hasPlanUpdateIntent
+      ? String(agentState.lastApprovedPlan || formatTodoListForDisplay(taskTodos) || '')
+      : '';
+    const planText = await requestPlan({
+      ...opts,
+      priorPlanText,
+      currentTodos: taskTodos,
+      planIntent: hasPlanUpdateIntent ? 'update' : 'new',
+    });
+
+    if (!planText || abortRef.aborted) {
+      await updateRunState(RUN_STATE_IDLE, abortRef.aborted ? 'aborted_during_plan' : 'plan_generation_failed', { requestId });
+      appendBubble('error', 'Failed to generate plan.');
+      return messages;
+    }
+
+    const decision = await showPlanApproval(chat, planText);
+    if (decision === 'reject') {
+      await updateRunState(RUN_STATE_IDLE, 'plan_rejected', { requestId });
+      appendBubble('error', 'Plan rejected.');
+      return messages;
+    }
+
+    approvedPlan = decision.startsWith('edit:') ? decision.slice(5) : planText;
+    agentState.lastApprovedPlan = approvedPlan;
+    executionPlan = sanitizePlanForExecution(approvedPlan, messages, workspace);
+    appendBubble('assistant', '✓ Plan approved. Executing…');
+    await persistAgentState();
+    if (!(await updateRunState(RUN_STATE_EXECUTING, 'plan_approved', { requestId }))) {
+      return history;
+    }
+  }
+
+  // ── Execution Phase ─────────────────────────────────────────────────
+  let projectContext = null;
+  try {
+    const ctx = await ipcRenderer.invoke('agent:get-project-context', { workspace });
+    if (ctx.ok) projectContext = ctx;
+  } catch {}
+  const existingTodoItems = agentState.todos?.length ? agentState.todos : todoState?.items;
+  const shouldRebuildTodos = Boolean(
+    shouldRunPlanPhase
+    || isFreshTaskPrompt
+    || !Array.isArray(existingTodoItems)
+    || existingTodoItems.length === 0
+    || isTodoStatePoisoned(existingTodoItems, workspace),
+  );
+  const todoPlanSource = approvedPlan || executionPlan || '';
+  const freshTodos = shouldRebuildTodos
+    ? createTaskTodoList(messages, todoPlanSource, workspace, {
+      frontendOnlyHint: isFrontendOnlyTask(executionPlan || approvedPlan || latestUserPrompt),
+    })
+    : existingTodoItems;
+  const allowTodoStatusCarryOver = hasContinuationIntent || !shouldRebuildTodos;
+  const seededTodos = allowTodoStatusCarryOver
+    ? mergeTodoState({ items: existingTodoItems }, freshTodos)
+    : freshTodos.map((todo, index) => ({ ...todo, id: index + 1, status: 'pending', error: '', evidence: null }));
+  taskTodos = pruneTodoListForFileWork(
+    seededTodos,
+    workspace,
+  );
+  agentState.todos = taskTodos;
+  if (todoState) todoState.items = taskTodos;
   await persistAgentState();
   const failureFingerprints = new Map(Object.entries(agentState.actionFingerprints?.failures || {}));
   const readLoopFingerprints = new Map(Object.entries(agentState.actionFingerprints?.readLoops || {}));
   const readRepeatFingerprints = new Map(Object.entries(agentState.actionFingerprints?.readRepeats || {}));
+  const manifestPathSet = new Set(
+    taskTodos
+      .map(todo => todo.path)
+      .filter(Boolean)
+      .map(p => String(p).replace(/\\/g, '/').toLowerCase()),
+  );
+  const activeManifest = executionPlan || sanitizePlanForExecution(agentState.lastApprovedPlan || '', messages, workspace);
   const toolCallNames = selectToolsForPhase(tools, taskTodos)
     .map(t => t.function?.name || t.name)
     .join(', ');
   const systemMsg = {
     role: 'system',
-    content: `You are Code Agent. The app state is the source of truth; your memory may be incomplete after compression. Tool calls: ${toolCallNames}. File writing: use <write_file> and <append_file> XML tags (see rules below).
+    content: `You are Code Agent. Workspace: ${workspace}
 
-WORKSPACE = "${workspace}"
+FILE WRITING — use XML tags in your text response:
+<write_file path="${workspace}/path/to/file.html">complete file content here</write_file>
+<append_file path="${workspace}/path/to/file.html">more content</append_file>
+- All paths MUST be absolute, starting with "${workspace}/"
+- Content between tags is raw text — double quotes are fine, no escaping needed.
+- For large files (>80 lines): <write_file> first 80 lines, <append_file> for rest.
+- Write real, complete code — no placeholders, no TODOs, no "content here".
+- Do NOT use write_file/append_file as tool calls. Do NOT use run_shell to write files.
 
-CRITICAL PATH RULES — NEVER violate:
-- Every tool call that takes a path argument MUST use an absolute path starting with "${workspace}/"
-- list_dir root = "${workspace}" — call it as: list_dir({"path": "${workspace}"})
-- read_file example: read_file({"path": "${workspace}/src/index.js"})
-- A capped read_file result is only a preview. It does NOT mean the file is incomplete.
-- For file writing, start with <write_file path="${workspace}/src/newfile.js">, then write the complete source code, then close with </write_file>.
-- NEVER pass "undefined", "null", "", ".", or any relative path as a path argument
-- NEVER guess or omit the workspace prefix
+TOOL CALLS (for everything else): ${toolCallNames}
+- Use edit_file for small changes to existing files.
+- Use read_file to inspect files. Use run_shell for npm, tests, builds, open.
 
-FILE WRITING — use XML tags, NOT tool calls:
-- To create/write a file, start the response with <write_file path="ABSOLUTE_FILE_PATH"> and put complete real source code before the closing tag.
-- To append to a file, start the response with <append_file path="ABSOLUTE_FILE_PATH"> and put complete real source code before the closing tag.
-- Safer alternative for large files: start with <<<FILE path="${workspace}/path/to/file" mode="write">, then write the complete real source code, then close with <<<END_FILE.
-- For appends use mode="append".
-- For files over 80 lines: use <write_file> for first 80 lines, then <append_file> for rest.
-- The content goes BETWEEN the tags as raw text. No JSON escaping needed.
-- The content between file tags must be the complete real file. Never write literal placeholders like "content here", "full file content here", "...", or "TODO".
-- You can use double quotes freely inside the tags.
-- Do NOT use write_file or append_file as tool calls — ONLY as XML tags in your response text.
-- NEVER use run_shell to write files (no cat >, echo >, heredoc, tee, etc). ONLY <write_file> tags.
-- Use edit_file for small exact replacements.
-- Use replace_file_range after read_file when exact-string editing is brittle.
-- NEVER call edit_file or replace_file_range to create a new file. If the target file does not exist yet, create it with <write_file> first.
-- Before editing/overwriting an existing file you did not just create in this session, call read_file with limit=5000 so the app can check stale writes.
-- NEVER output placeholder paths like "/file", "path/to/file", or "/absolute/path/to/file". Use the actual absolute target path.
-- NEVER call create_dir for a file path like script.js, style.css, index.html, README.md, or anything with a file extension. Use <write_file> for files.
-
-WORKFLOW RULES:
-0. Complete the ENTIRE task without asking the user to continue.
-1. At the start of unfamiliar projects, use inspect_project once, then use read_many_files/file_state to gather targeted context cheaply.
-2. Pick exactly one next action: inspect, write, edit, run, verify, or final.
-3. Work on the first pending/failed todo. Do not create duplicate project folders.
-4. Do not narrate progress only. If work remains, emit a tool call or complete file block.
-5. NEVER show file contents in chat as markdown/code fences; use file blocks or tools.
-6. After file creation/editing, verify locally with suitable commands when possible.
-7. Say "Done." only when every todo is done and verification passes or is impossible with a stated reason.
-8. Do not repeat successful completed operations. Re-read only when needed to edit or verify current file state.
-9. A todo is done only when its file exists or the relevant operation actually changed something. "Directory already exists" is not progress on a file todo.
-10. create_dir is unavailable. Parent directories are created automatically by <write_file>. If a folder exists, move on to writing the next file.
-11. If you attempt to do a tool call and you get an error, do not try it again, analyze the error/debug client program sends to you and figure out what you need to fix in your approach
-12. run_shell is unavailable while file todos are pending. Write files first; verification commands come after.
-${executionPlan ? `\nAPPROVED FILE MANIFEST — only use this to choose file targets, not as a feature checklist:\n${executionPlan}` : ''}
+WORKFLOW:
+- Complete the ENTIRE task autonomously. Do not ask the user what to do next.
+- Say "Done." with a summary only when finished.
+${activeManifest ? `\nFILE MANIFEST:\n${activeManifest}` : ''}
 ${formatTodoListForPrompt(taskTodos)}
-${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''}
 `,
   };
   if (history.length > 0 && history[0].role === 'system') {
@@ -271,10 +525,12 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
   let forceTextWriteOnly = false;
   let plainContinuationCount = 0;
   let incompleteWriteRetries = 0;
+  const partialRecoveryTracker = new Map();
   let emptyContinuationCount = 0;
-  let shouldStopAgent = false;
+  let consecutiveNoProgressCycles = 0;
+  let lastToolCommentaryFingerprint = '';
   const plainResponseFingerprints = new Map();
-  const successfulActionFingerprints = new Map();
+  const successfulActionFingerprints = new Map(Object.entries(agentState.actionFingerprints?.successes || {}));
 
   // Live stream bubble — shows tokens as they arrive via IPC 'stream-chunk'
   let activeStreamEl = null;
@@ -391,6 +647,10 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
 
   while (true) {
     if (abortRef.aborted || shouldStopAgent) break;
+    if (!(await updateRunState(RUN_STATE_EXECUTING, 'requesting_model', { requestId }))) break;
+    let cycleHadToolCalls = false;
+    let cycleHadTextWrite = false;
+    let cycleMadeProgress = false;
 
     // Remove any previous stream bubble before starting a new request
     if (activeStreamEl) { activeStreamEl.remove(); activeStreamEl = null; }
@@ -398,6 +658,13 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
     // Send to backend — filter out file-body tools. Large source code is
     // streamed as text and written locally, never as llama.cpp tool-call JSON.
     const stageContext = await resolveExecutionStage(taskTodos, workspace);
+    if (stageContext.name === 'create_files' && stageContext.firstMissingTodo?.path) {
+      // Deterministic create stage: force direct file creation instead of tool loops.
+      forceTextWriteOnly = true;
+    } else if (stageContext.name !== 'create_files' && consecutiveNoProgressCycles === 0) {
+      // Allow normal tool usage again once create stage is cleared and progress has resumed.
+      forceTextWriteOnly = false;
+    }
     const filteredTools = forceTextWriteOnly ? [] : selectToolsForPhase(tools, taskTodos, stageContext);
     const activeToolNames = new Set(filteredTools.map(tool => tool.function?.name || tool.name).filter(Boolean));
     const outgoingMessages = injectAgentStateReplay(
@@ -439,6 +706,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
       const contextShiftDisabled = /context shift is disabled/i.test(String(r.error || '')) ||
         /context shift is disabled/i.test(JSON.stringify(r.error_details || {}));
       if (contextShiftDisabled) {
+        await updateRunState(RUN_STATE_RECOVERING, 'context_shift_disabled');
         forceTextWriteOnly = true;
         history.push({
           role: 'user',
@@ -450,6 +718,7 @@ Do not rewrite very large files in one response. Do not call JSON write tools.`,
         await persistAgentState();
         continue;
       }
+      await updateRunState(RUN_STATE_STUCK, `worker_error:${String(r.error || 'unknown')}`);
       await persistAgentState();
       break;
     }
@@ -471,6 +740,7 @@ Do not rewrite very large files in one response. Do not call JSON write tools.`,
     // fragile with large escaped source files.
     if (data.response) {
       const writeBlocks = extractTextWriteBlocks(data.response, history, taskTodos);
+      if (writeBlocks.length > 0) cycleHadTextWrite = true;
       for (let block of writeBlocks) {
         const normalized = normalizeTextWriteBlockPath(block, taskTodos, workspace);
         if (!normalized.ok) {
@@ -490,12 +760,41 @@ Do not rewrite very large files in one response. Do not call JSON write tools.`,
           continue;
         }
         block = normalized.block;
+        const pendingFileTodos = getPendingTodos(taskTodos).filter(todo => todo.path);
+        if (pendingFileTodos.length > 0 && !pendingFileTodos.some(todo => sameTodoPath(todo.path, block.path))) {
+          const firstPending = stageContext?.firstMissingTodo || pendingFileTodos[0];
+          const expected = firstPending?.path || '';
+          const error = `Write target is outside pending todo scope: ${block.path}. Current required target is ${expected || 'the first pending file todo'}.`;
+          refreshTodoView();
+          addActivity({
+            kind: 'write',
+            status: 'error',
+            title: `Blocked off-scope write ${shortPath(block.path)}`,
+            subtitle: block.path,
+            detail: { path: block.path, status: 'blocked', error, expected },
+          });
+          history.push({
+            role: 'user',
+            content: `${error}\nNow emit one complete <write_file path="${expected || block.path}"> block for the required target.\nNo narration. No extra file paths.`,
+          });
+          forceTextWriteOnly = true;
+          if (recordRepeatedFailure(failureFingerprints, 'off_scope_text_write', block.path, error) >= 2) {
+            await updateRunState(RUN_STATE_STUCK, 'repeated_off_scope_text_write');
+            appendBubble('error', 'Repeated off-scope write attempts — stopping to avoid corruption.');
+            shouldStopAgent = true;
+            break;
+          }
+          await persistAgentState();
+          continue;
+        }
         markTodoInProgress(taskTodos, block.path);
         refreshTodoView();
         const result = await executeTextWriteBlock(block, workspace, agentState);
         if (result.ok) {
+          partialRecoveryTracker.delete(String(block.path || '').toLowerCase());
           updateReadStateFromToolResult(agentState, block.path, result);
           recordFileHistory(agentState, block.path, block.tool, result, previewText(block.content));
+          updateSymbolLedger(agentState, block.path, block.content);
           const verification = await verifySpecificTodoFile(block.path, workspace);
           if (verification.ok) {
             markTodoDone(taskTodos, block.path, {
@@ -530,12 +829,17 @@ Do not rewrite very large files in one response. Do not call JSON write tools.`,
               alreadyExists: result.alreadyExists,
               unchanged: result.unchanged,
               repairedDirectory: result.repairedDirectory,
+              routedCreateFromAppend: result.routedCreateFromAppend,
+              targetExistedBeforeWrite: result.targetExistedBeforeWrite,
               preview: previewText(block.content),
               result: result.result,
             },
           });
           toolCallCount++;
+          cycleMadeProgress = true;
+          await markProgress(`text_${block.tool}:${block.path}`, { lastToolName: block.tool });
         } else {
+          await updateRunState(RUN_STATE_RECOVERING, `text_${block.tool}_failed:${block.path}`);
           recordFileHistory(agentState, block.path, block.tool, result, previewText(block.content));
           markTodoFailed(taskTodos, block.path, result.error);
           refreshTodoView();
@@ -550,6 +854,7 @@ Do not rewrite very large files in one response. Do not call JSON write tools.`,
             agentState.actionFingerprints = agentState.actionFingerprints || {};
             agentState.actionFingerprints.failures = Object.fromEntries(failureFingerprints.entries());
             await persistAgentState();
+            await updateRunState(RUN_STATE_STUCK, `repeated_text_write_failure:${block.path}`);
             appendBubble('error', `Repeated write failure for ${block.path} — stopping to avoid a loop.`);
             shouldStopAgent = true;
             break;
@@ -557,12 +862,12 @@ Do not rewrite very large files in one response. Do not call JSON write tools.`,
           agentState.actionFingerprints = agentState.actionFingerprints || {};
           agentState.actionFingerprints.failures = Object.fromEntries(failureFingerprints.entries());
         }
-        history.push({
-          role: 'assistant',
-          content: result.ok
-            ? `Wrote ${block.path} (${result.lines || 0} lines)`
-            : `Failed to write ${block.path}: ${result.error}`,
-        });
+        if (!result.ok) {
+          history.push({
+            role: 'assistant',
+            content: `Failed to write ${block.path}: ${result.error}`,
+          });
+        }
         await persistAgentState();
       }
       if (writeBlocks.length > 0) {
@@ -575,25 +880,42 @@ Do not rewrite very large files in one response. Do not call JSON write tools.`,
 
       const incompleteWrite = findIncompleteTextWriteBlock(data.response);
       if (incompleteWrite) {
+        await updateRunState(RUN_STATE_RECOVERING, `incomplete_${incompleteWrite.tool}:${incompleteWrite.path || 'unknown'}`);
         const nearTokenCap = Number(data.tokens?.response || 0) >= 7900;
         const contextShiftDisabled = Boolean(
           data.stream?.contextShiftDisabled ||
           String(data.finish_reason || '').toLowerCase() === 'context_shift_disabled',
         );
-        if ((contextShiftDisabled || nearTokenCap) && incompleteWrite.path) {
+        if (incompleteWrite.path) {
           const partial = extractIncompleteWriteContent(data.response, incompleteWrite);
           const normalized = normalizeTextWriteBlockPath({
             tool: incompleteWrite.tool,
             path: incompleteWrite.path,
             content: partial,
           }, taskTodos, workspace);
-          if (normalized.ok && String(normalized.block.content || '').trim().length > 40) {
+          if (normalized.ok && String(normalized.block.content || '').trim().length > 120) {
             markTodoInProgress(taskTodos, normalized.block.path);
             refreshTodoView();
             const recovered = await executeTextWriteBlock(normalized.block, workspace, agentState);
             if (recovered.ok) {
+              const recoveryKey = String(normalized.block.path || '').toLowerCase();
+              const prevRecovery = partialRecoveryTracker.get(recoveryKey) || { count: 0, lastBytes: 0 };
+              const nextRecovery = {
+                count: prevRecovery.count + 1,
+                lastBytes: Number(recovered.afterBytes || 0),
+              };
+              partialRecoveryTracker.set(recoveryKey, nextRecovery);
+              if (nextRecovery.count > 6) {
+                await updateRunState(RUN_STATE_STUCK, `excessive_partial_recovery:${normalized.block.path}`);
+                appendBubble('error', `Repeated partial recovery for ${normalized.block.path} exceeded 6 attempts — stopping to avoid duplicate appends.`);
+                await persistAgentState();
+                break;
+              }
               updateReadStateFromToolResult(agentState, normalized.block.path, recovered);
               recordFileHistory(agentState, normalized.block.path, `${normalized.block.tool}_partial_recovery`, recovered, previewText(normalized.block.content));
+              updateSymbolLedger(agentState, normalized.block.path, normalized.block.content);
+              await markProgress(`partial_recovery:${normalized.block.path}`, { lastToolName: normalized.block.tool });
+              cycleMadeProgress = true;
               addActivity({
                 kind: 'write',
                 status: 'success',
@@ -614,7 +936,7 @@ Do not rewrite very large files in one response. Do not call JSON write tools.`,
               history.push({ role: 'assistant', content: stripLargeIncompleteWrite(data.response) });
               history.push({
                 role: 'user',
-                content: `The previous response was interrupted${contextShiftDisabled ? ' by a llama.cpp stream error (context shift disabled)' : ' by hitting the output token limit'}. The already-written chunk for "${normalized.block.path}" was recovered.
+                content: `The previous response was interrupted${contextShiftDisabled ? ' by a llama.cpp stream error (context shift disabled)' : nearTokenCap ? ' by hitting the output token limit' : ''}. The already-written chunk for "${normalized.block.path}" was recovered.
 Continue by appending ONLY the next small chunk (max 2000 chars) with:
 <append_file path="${normalized.block.path}">
 ...next chunk...
@@ -629,16 +951,22 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
           }
         }
         incompleteWriteRetries++;
-        if (incompleteWriteRetries > 2) {
+        if (incompleteWriteRetries > 3) {
+          await updateRunState(RUN_STATE_STUCK, `repeated_incomplete_write:${incompleteWrite.path || 'unknown'}`);
           appendBubble('error', `Incomplete file write for ${incompleteWrite.path || 'unknown file'} repeated ${incompleteWriteRetries} times — stopping.`);
           break;
         }
-        appendBubble('error', `Incomplete file write detected — retry ${incompleteWriteRetries}/2…`);
+        appendBubble('error', `Incomplete file write detected — retry ${incompleteWriteRetries}/3…`);
         forceTextWriteOnly = true;
         history.push({ role: 'assistant', content: stripLargeIncompleteWrite(data.response) });
         history.push({
           role: 'user',
-          content: `Your previous <${incompleteWrite.tool}> block${incompleteWrite.path ? ` for "${incompleteWrite.path}"` : ''} was cut off before the closing tag, so it was NOT written. Re-send using only COMPLETE XML blocks, and hard-chunk the file into small parts (max 2000 chars per block): first block must be <write_file>, remaining blocks must be <append_file> for the same path. End each block with its closing tag before sending anything else. Use actual absolute paths under "${workspace}". Do not use placeholder paths, JSON tools, or say Done.`,
+          content: `Your previous <${incompleteWrite.tool}> block${incompleteWrite.path ? ` for "${incompleteWrite.path}"` : ''} was cut off before the closing tag.
+Do NOT narrate and do NOT restart from another file.
+Continue the SAME file using a single COMPLETE block (max 2000 chars):
+- If file already exists, prefer <append_file path="${incompleteWrite.path || ''}">...</append_file>
+- Otherwise use <write_file path="${incompleteWrite.path || ''}">...</write_file>
+Always close the tag in the same response. No JSON tools. No placeholders.`,
         });
         continue;
       }
@@ -656,9 +984,11 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
     if (!data.tool_calls && data.response && data.response.startsWith('ERROR:')) {
       overflowRetries++;
       if (overflowRetries > 2) {
+        await updateRunState(RUN_STATE_STUCK, `tool_overflow_repeated:${overflowRetries}`);
         appendBubble('error', `Tool call overflow repeated ${overflowRetries} times — stopping.`);
         break;
       }
+      await updateRunState(RUN_STATE_RECOVERING, `tool_overflow_retry:${overflowRetries}`);
       appendBubble('error', `Tool call too large — retry ${overflowRetries}/2…`);
       forceTextWriteOnly = true;
       history.push({ role: 'assistant', content: data.response });
@@ -685,6 +1015,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
 
       // Skip rendering if the model just echoed back a tool result (llama3.1 quirk)
       if (rawResp.startsWith('<tool_result') || rawResp.startsWith('<tool_response')) {
+        await updateRunState(RUN_STATE_RECOVERING, 'model_echoed_tool_result');
         // Model echoed the tool result — loop again to get the actual response
         history.push({ role: 'assistant', content: '' });
         continue;
@@ -712,13 +1043,14 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
           history.push({ role: 'assistant', content: resp });
           history.push({
             role: 'user',
-            content: `You said Done, but local verification failed:\n${verification.failed.map(f => `- ${f.path}: ${f.error}`).join('\n')}\nFix these files now. Do not say Done until verification passes.`,
+            content: `You said Done, but local verification failed:\n${verification.failed.map(f => `- ${f.path}: ${f.error}`).join('\n')}\nFix ONLY these failing file paths. Do not rewrite unrelated files. Start with ${verification.failed[0]?.path || 'the first failing file'} and emit one complete <write_file> block for that file. Do not say Done until verification passes.`,
           });
           continue;
         }
       }
 
-      if (data.finish_reason && isTruncatedFinish(data.finish_reason) && toolCallCount > 0) {
+      if (data.finish_reason && isTruncatedFinish(data.finish_reason)) {
+        await updateRunState(RUN_STATE_RECOVERING, `truncated_finish:${data.finish_reason}`);
         history.push({ role: 'assistant', content: resp || `[Generation stopped early: ${data.finish_reason}]` });
         history.push({
           role: 'user',
@@ -746,6 +1078,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
         if (repeatedPlain >= 3 || plainContinuationCount >= 3) {
           const first = getPendingTodos(taskTodos)[0];
           const msg = `Agent stuck: repeated progress-only responses without a tool call or file block.${first ? ` Next pending item: ${first.title}${first.path ? ` (${first.path})` : ''}.` : ''}`;
+          await updateRunState(RUN_STATE_STUCK, 'repeated_progress_only_responses');
           appendBubble('error', msg);
           addActivity({
             kind: 'info',
@@ -773,30 +1106,66 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
         continue;
       }
 
+      // Never finish a turn while file todos are still pending/failed.
+      const pendingBeforeFinalize = getPendingTodos(taskTodos);
+      if (pendingBeforeFinalize.length > 0) {
+        history.push({ role: 'assistant', content: resp || '' });
+        history.push({
+          role: 'user',
+          content: buildContinuationNudge(taskTodos, workspace),
+        });
+        emptyContinuationCount += 1;
+        if (emptyContinuationCount >= 4) {
+          const first = pendingBeforeFinalize[0];
+          const msg = `Agent stuck: no concrete action while todos remain pending.${first ? ` Next pending item: ${first.title}${first.path ? ` (${first.path})` : ''}.` : ''}`;
+          await updateRunState(RUN_STATE_STUCK, 'pending_todos_without_action');
+          appendBubble('error', msg);
+          addActivity({
+            kind: 'info',
+            status: 'error',
+            title: 'Agent stuck',
+            subtitle: first?.path || first?.title || 'No concrete next action',
+            detail: { status: 'stuck', error: msg, todo: first || null },
+          });
+          await persistAgentState();
+          break;
+        }
+        continue;
+      }
+
       const displayResp = resp || 'Stopped: model returned an empty response before confirming completion.';
       appendBubble('assistant', displayResp, meta);
       history.push({ role: 'assistant', content: displayResp });
+      await updateRunState(RUN_STATE_DONE, 'assistant_final_response');
       if (pendingThinkText) appendThinkingBlock(chat, pendingThinkText);
       ipcRenderer.removeListener('stream-chunk', onStreamChunk);
       if (todoState) todoState.items = taskTodos;
       await persistAgentState();
       // Strip the injected system message before returning — renderer stores clean history
+      history = await trimHistory(history);
       return history.filter(m => !(m.role === 'system' && (
-        m.content.startsWith('You are a coding assistant') ||
-        m.content.startsWith('You are LLM Cluster Code Agent')
+        String(m.content || '').startsWith('You are a coding assistant') ||
+        String(m.content || '').startsWith('You are LLM Cluster Code Agent')
       )));
     }
 
     // Has tool calls — show approval cards and execute
+    if (!(await updateRunState(RUN_STATE_WAITING_TOOL, 'processing_tool_calls', { count: data.tool_calls.length }))) break;
+    cycleHadToolCalls = true;
     // If model also sent commentary text alongside tool calls, render it as a bubble
     const commentary = (data.response || '').trim();
     if (commentary) {
-      appendBubble('assistant', commentary);
+      const fingerprint = commentary.toLowerCase().replace(/\s+/g, ' ').trim();
+      if (fingerprint !== lastToolCommentaryFingerprint) {
+        appendBubble('assistant', commentary);
+      }
+      lastToolCommentaryFingerprint = fingerprint;
     }
     // Append assistant's tool_calls turn to history (content set to commentary or empty)
     history.push({ role: 'assistant', content: commentary, tool_calls: data.tool_calls });
 
     if (toolCallCount >= MAX_TOOL_CALLS) {
+      await updateRunState(RUN_STATE_STUCK, `tool_call_limit_reached:${MAX_TOOL_CALLS}`);
       appendBubble('error', `Reached tool call limit (${MAX_TOOL_CALLS}) per turn. Stopping.`);
       break;
     }
@@ -812,6 +1181,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
       let args;
       if (typeof rawArgs === 'string') {
         try { args = JSON.parse(rawArgs); } catch {
+          await updateRunState(RUN_STATE_RECOVERING, `malformed_tool_args:${toolName}`);
           appendBubble('error', `Tool "${toolName}": malformed arguments (JSON parse failed). Skipping.`);
           history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: 'Malformed tool call arguments — JSON parse failed. The arguments string was truncated or invalid. Try again with shorter content, or use edit_file instead of write_file.' }) });
           continue;
@@ -820,6 +1190,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
         args = rawArgs;
       }
       if (!activeToolNames.has(toolName)) {
+        await updateRunState(RUN_STATE_RECOVERING, `blocked_tool:${toolName}`);
         const first = stageContext.firstMissingTodo || getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
         const error = `Tool "${toolName}" is not enabled for the current phase.`;
         addActivity({
@@ -838,6 +1209,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
           forceTextWriteOnly = true;
         }
         if (recordRepeatedFailure(failureFingerprints, `blocked_${toolName}`, args.path || '', `${error}:${stageContext.name}`) >= 3) {
+          await updateRunState(RUN_STATE_STUCK, `repeated_blocked_tool:${toolName}`);
           appendBubble('error', `Repeated blocked ${toolName} calls — stopping to avoid a loop.`);
           shouldStopAgent = true;
           await persistAgentState();
@@ -845,12 +1217,14 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
         break;
       }
       if (TEXT_WRITE_TOOLS.has(toolName)) {
+        await updateRunState(RUN_STATE_RECOVERING, `native_text_tool_blocked:${toolName}`);
         appendBubble('error', `Tool "${toolName}" is disabled as a native tool. Use <${toolName} path="...">...</${toolName}> text blocks instead.`);
         history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: `${toolName} is not available as a JSON tool because large file contents break llama.cpp parsing. Emit XML write blocks in assistant text instead.` }) });
         history.push({ role: 'user', content: buildContinuationNudge(taskTodos, workspace) });
         break;
       }
       if (DISABLED_MODEL_TOOLS.has(toolName)) {
+        await updateRunState(RUN_STATE_RECOVERING, `disabled_tool:${toolName}`);
         const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
         const error = `Tool "${toolName}" is disabled. Parent directories are created automatically by <write_file>; write the next target file instead.`;
         addActivity({
@@ -868,6 +1242,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
         break;
       }
       if (toolName === 'run_shell' && getPendingTodos(taskTodos).some(todo => todo.path)) {
+        await updateRunState(RUN_STATE_RECOVERING, 'blocked_run_shell_pending_files');
         const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
         const error = 'run_shell is disabled while file todos are pending. The app creates parent directories automatically when writing files.';
         addActivity({
@@ -885,7 +1260,174 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
         forceTextWriteOnly = true;
         break;
       }
+      if (toolName === 'delete_file' && args.path && getPendingTodos(taskTodos).some(todo => todo.path && sameTodoPath(todo.path, args.path))) {
+        await updateRunState(RUN_STATE_RECOVERING, 'blocked_delete_pending_target');
+        const first = getPendingTodos(taskTodos).find(todo => todo.path && sameTodoPath(todo.path, args.path))
+          || getPendingTodos(taskTodos).find(todo => todo.path)
+          || getPendingTodos(taskTodos)[0];
+        const targetPath = first?.path || String(args.path);
+        const error = `delete_file is blocked for active todo targets (${args.path}). Overwrite/fix the file directly with <write_file> instead of deleting it.`;
+        addActivity({
+          kind: 'write',
+          status: 'error',
+          title: 'Blocked delete_file on pending target',
+          subtitle: shortPath(targetPath),
+          detail: { tool: toolName, path: String(args.path), status: 'blocked', error },
+        });
+        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error, blocked: true }) });
+        history.push({
+          role: 'user',
+          content: `${error}\nNow emit one complete <write_file path="${targetPath}"> block with the corrected full file content.\nNo narration.`,
+        });
+        forceTextWriteOnly = true;
+        await persistAgentState();
+        break;
+      }
+      if (toolName === 'inspect_project' && stageContext.name === 'create_files' && stageContext.firstMissingTodo?.path) {
+        await updateRunState(RUN_STATE_RECOVERING, 'blocked_inspect_project_create_stage');
+        const targetPath = stageContext.firstMissingTodo.path;
+        const error = `inspect_project is not needed right now. Missing file must be created first: ${targetPath}`;
+        addActivity({
+          kind: 'read',
+          status: 'error',
+          title: 'Blocked inspect_project in create stage',
+          subtitle: targetPath,
+          detail: { tool: toolName, path: targetPath, status: 'blocked', error },
+        });
+        history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error, stage: stageContext.name }) });
+        history.push({
+          role: 'user',
+          content: `${error}\nNow emit one complete <write_file path="${targetPath}"> block for that file.\nNo narration. No extra tool call.`,
+        });
+        forceTextWriteOnly = true;
+        if (recordRepeatedFailure(failureFingerprints, 'inspect_project_create_stage', targetPath, error) >= 2) {
+          await updateRunState(RUN_STATE_STUCK, 'repeated_inspect_project_create_stage');
+          appendBubble('error', 'Repeated inspect_project calls during create stage — stopping to avoid a loop.');
+          shouldStopAgent = true;
+        }
+        await persistAgentState();
+        break;
+      }
+      if (stageContext.name === 'create_files' && stageContext.firstMissingTodo?.path && ['read_file', 'read_many_files', 'file_state', 'list_dir', 'glob', 'grep'].includes(toolName)) {
+        const targetPath = stageContext.firstMissingTodo.path;
+        const requestedPaths = (() => {
+          if (toolName === 'read_file') return args.path ? [String(args.path)] : [];
+          if (toolName === 'read_many_files' || toolName === 'file_state') {
+            if (Array.isArray(args.paths)) return args.paths.map(p => String(p));
+            if (args.path) return [String(args.path)];
+            return [];
+          }
+          if (toolName === 'list_dir') return args.path || args.root ? [String(args.path || args.root)] : [];
+          return [];
+        })();
+        const isAllowedRead = requestedPaths.length > 0 && requestedPaths.every(p => sameTodoPath(p, targetPath));
+        if (!isAllowedRead) {
+          await updateRunState(RUN_STATE_RECOVERING, `blocked_${toolName}_outside_create_target`);
+          const error = `${toolName} is out of scope during create stage. Current target file is ${targetPath}.`;
+          addActivity({
+            kind: 'read',
+            status: 'error',
+            title: `Blocked ${toolName} outside target`,
+            subtitle: targetPath,
+            detail: { tool: toolName, status: 'blocked', error, requestedPaths },
+          });
+          history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error, stage: stageContext.name, targetPath }) });
+          history.push({
+            role: 'user',
+            content: `${error}\nNow emit one complete <write_file path="${targetPath}"> block for that file.\nNo narration. No extra tool call.`,
+          });
+          forceTextWriteOnly = true;
+          if (recordRepeatedFailure(failureFingerprints, `${toolName}_outside_create_target`, targetPath, error) >= 2) {
+            await updateRunState(RUN_STATE_STUCK, `repeated_${toolName}_outside_create_target`);
+            appendBubble('error', `Repeated ${toolName} outside target during create stage — stopping to avoid a loop.`);
+            shouldStopAgent = true;
+          }
+          await persistAgentState();
+          break;
+        }
+      }
+      if (manifestPathSet.size > 1 && getPendingTodos(taskTodos).some(todo => todo.path) && ['read_file', 'read_many_files', 'file_state', 'list_dir', 'glob', 'grep'].includes(toolName)) {
+        const requestedPaths = (() => {
+          if (toolName === 'read_file') return args.path ? [String(args.path)] : [];
+          if (toolName === 'read_many_files' || toolName === 'file_state') {
+            if (Array.isArray(args.paths)) return args.paths.map(p => String(p));
+            if (args.path) return [String(args.path)];
+            return [];
+          }
+          if (toolName === 'list_dir') return args.path ? [String(args.path)] : [];
+          return [];
+        })();
+        const normalizedRequestedRaw = requestedPaths.map(p => normalizeTodoPath(p, workspace));
+        const hasInvalidRequestedPath = normalizedRequestedRaw.some(p => !p);
+        const normalizedRequested = normalizedRequestedRaw
+          .filter(Boolean)
+          .map(p => p.replace(/\\/g, '/').toLowerCase());
+        const hasOutOfManifestPath = normalizedRequested.some(p => !manifestPathSet.has(p));
+        const missingExplicitPath = requestedPaths.length === 0 && ['read_file', 'read_many_files', 'file_state', 'list_dir'].includes(toolName);
+        const blockUnscopedRead = ['glob', 'grep'].includes(toolName) || missingExplicitPath || (requestedPaths.length > 0 && (hasInvalidRequestedPath || hasOutOfManifestPath));
+        if (blockUnscopedRead) {
+          const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+          const targetPath = first?.path || stageContext.firstMissingTodo?.path || '';
+          const error = hasInvalidRequestedPath
+            ? `${toolName} used an invalid/unresolvable path while file-manifest execution is locked.`
+            : `${toolName} is outside the current file manifest. Focus only on pending todo files first.`;
+          addActivity({
+            kind: 'read',
+            status: 'error',
+            title: `Blocked ${toolName} outside manifest`,
+            subtitle: targetPath,
+            detail: { tool: toolName, status: 'blocked', error, requestedPaths },
+          });
+          history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error, manifestLocked: true }) });
+          if (targetPath) {
+            history.push({
+              role: 'user',
+              content: `${error}\nNext pending file: ${targetPath}\nNow emit one complete <write_file path="${targetPath}"> block for that file. No narration.`,
+            });
+            forceTextWriteOnly = true;
+          }
+          if (recordRepeatedFailure(failureFingerprints, `${toolName}_outside_manifest`, targetPath || '', error) >= 2) {
+            await updateRunState(RUN_STATE_STUCK, `repeated_${toolName}_outside_manifest`);
+            appendBubble('error', `Repeated ${toolName} calls outside the plan manifest — stopping to avoid a loop.`);
+            shouldStopAgent = true;
+          }
+          await persistAgentState();
+          break;
+        }
+      }
+      if (toolName === 'inspect_project' && getPendingTodos(taskTodos).some(todo => todo.path)) {
+        const priorInspectSuccess = [...successfulActionFingerprints.keys()].some(key => key.startsWith('inspect_project:'));
+        if (priorInspectSuccess) {
+          await updateRunState(RUN_STATE_RECOVERING, 'blocked_repeated_inspect_project');
+          const first = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+          const targetPath = first?.path || '';
+          const error = 'inspect_project was already run for this task. Move directly to the next pending file.';
+          addActivity({
+            kind: 'read',
+            status: 'error',
+            title: 'Blocked repeated inspect_project',
+            subtitle: targetPath,
+            detail: { tool: toolName, status: 'blocked', error },
+          });
+          history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error }) });
+          if (targetPath) {
+            history.push({
+              role: 'user',
+              content: `${error}\nNext pending file: ${targetPath}\nEmit one complete <write_file path="${targetPath}"> block now. No narration.`,
+            });
+            forceTextWriteOnly = true;
+          }
+          if (recordRepeatedFailure(failureFingerprints, 'repeated_inspect_project_block', targetPath || '', error) >= 2) {
+            await updateRunState(RUN_STATE_STUCK, 'repeated_inspect_project_block');
+            appendBubble('error', 'Repeated inspect_project without progress — stopping to avoid a loop.');
+            shouldStopAgent = true;
+          }
+          await persistAgentState();
+          break;
+        }
+      }
       if (stageContext.name === 'create_files' && ['edit_file', 'replace_file_range'].includes(toolName)) {
+        await updateRunState(RUN_STATE_RECOVERING, `blocked_${toolName}_create_stage`);
         const targetPath = stageContext.firstMissingTodo?.path || args.path || stageContext.firstTodo?.path || '';
         const error = `Cannot use ${toolName} while pending files still need initial creation. Create missing files first with <write_file>.`;
         addActivity({
@@ -904,6 +1446,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
           forceTextWriteOnly = true;
         }
         if (recordRepeatedFailure(failureFingerprints, `${toolName}_create_stage`, targetPath || '', error) >= 3) {
+          await updateRunState(RUN_STATE_STUCK, `repeated_${toolName}_create_stage`);
           appendBubble('error', `Repeated ${toolName} calls during create stage — stopping to avoid a loop.`);
           shouldStopAgent = true;
           await persistAgentState();
@@ -913,6 +1456,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
       if (['edit_file', 'replace_file_range'].includes(toolName) && args.path) {
         const fileState = await ipcRenderer.invoke('agent:get-file-state', { path: args.path, workspace });
         if (!fileState.ok || !fileState.snapshot?.isFile) {
+          await updateRunState(RUN_STATE_RECOVERING, `blocked_${toolName}_missing_file`);
           const first = stageContext.firstMissingTodo || getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
           const error = `Cannot use ${toolName} on a missing/non-file path (${args.path}). Create it first with <write_file>.`;
           if (args.path) markTodoFailed(taskTodos, args.path, error);
@@ -946,6 +1490,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
       ];
       const suspicious = injectionPatterns.some(p => p.test(argsStr));
       if (suspicious) {
+        await updateRunState(RUN_STATE_RECOVERING, `suspicious_tool_args:${toolName}`);
         appendBubble('error', `⚠ Suspicious content detected in tool call arguments. Tool call blocked.`);
         history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: 'Blocked: suspicious content in arguments.' }) });
         continue;
@@ -969,6 +1514,7 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
       if (approved) {
         const invokeArgs = attachAgentStateToToolArgs(toolName, args, agentState);
         toolResult = await ipcRenderer.invoke('agent:run-tool', { tool: toolName, args: invokeArgs, workspace });
+        toolResult = normalizeMutationToolResultEnvelope(toolName, args, toolResult);
 
         // Auto-retry: edit_file "old_string not found" → read actual content and tell model
         if (!toolResult.ok && toolName === 'edit_file' && toolResult.error?.includes('old_string not found')) {
@@ -981,11 +1527,19 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
             };
           }
         }
+        toolResult = normalizeMutationToolResultEnvelope(toolName, args, toolResult);
 
         // Surface errors visibly so the user can see what went wrong
         if (!toolResult.ok) {
+          await updateRunState(RUN_STATE_RECOVERING, `tool_failed:${toolName}`);
           if (args.path) recordFileHistory(agentState, args.path, toolName, toolResult, '');
-          if (args.path) markTodoFailed(taskTodos, args.path, toolResult.error);
+          if (args.path) {
+            const hasTodoTarget = Boolean(findTodoForTarget(taskTodos, args.path));
+            const mutationFailure = MUTATION_TOOLS.has(toolName);
+            if (hasTodoTarget || mutationFailure) {
+              markTodoFailed(taskTodos, args.path, toolResult.error);
+            }
+          }
           refreshTodoView();
           addActivity({
             kind: activityKindForTool(toolName),
@@ -998,15 +1552,51 @@ Do not rewrite the file from the top. Do not call JSON tools. End each block wit
             agentState.actionFingerprints = agentState.actionFingerprints || {};
             agentState.actionFingerprints.failures = Object.fromEntries(failureFingerprints.entries());
             await persistAgentState();
+            await updateRunState(RUN_STATE_STUCK, `repeated_tool_failure:${toolName}`);
             appendBubble('error', `Repeated failure in ${toolName} — stopping to avoid a loop.`);
             shouldStopAgent = true;
             break;
+          }
+          if (
+            toolName === 'read_file' &&
+            args.path &&
+            !findTodoForTarget(taskTodos, args.path) &&
+            /enoent|no such file or directory/i.test(String(toolResult.error || '')) &&
+            getPendingTodos(taskTodos).some(todo => todo.path)
+          ) {
+            const firstPending = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+            history.push({
+              role: 'user',
+              content: `Do not probe missing non-todo files (${args.path}) while file work is pending.
+Next pending file: ${firstPending?.title || ''}${firstPending?.path ? ` (${firstPending.path})` : ''}
+Now emit one complete <write_file path="${firstPending?.path || workspace + '/index.html'}"> block. No narration.`,
+            });
+            forceTextWriteOnly = true;
+          }
+          if (
+            toolName === 'read_file' &&
+            args.path &&
+            toolResult.scopeLocked &&
+            getPendingTodos(taskTodos).some(todo => todo.path)
+          ) {
+            const firstPending = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+            history.push({
+              role: 'user',
+              content: `read_file was blocked because it is outside the active todo file scope (${args.path}).
+Focus only on pending file targets and write the next one now.
+Next pending file: ${firstPending?.title || ''}${firstPending?.path ? ` (${firstPending.path})` : ''}
+Emit one complete <write_file path="${firstPending?.path || workspace + '/index.html'}"> block. No narration.`,
+            });
+            forceTextWriteOnly = true;
           }
           agentState.actionFingerprints = agentState.actionFingerprints || {};
           agentState.actionFingerprints.failures = Object.fromEntries(failureFingerprints.entries());
           await persistAgentState();
         } else {
           const repeatedSuccesses = recordSuccessfulAction(successfulActionFingerprints, toolName, args, toolResult);
+          let progressMade = false;
+          agentState.actionFingerprints = agentState.actionFingerprints || {};
+          agentState.actionFingerprints.successes = Object.fromEntries(successfulActionFingerprints.entries());
           if (toolName === 'read_file' && args.path) {
             const readPath = String(args.path);
             const hasPendingFileTodo = getPendingTodos(taskTodos).some(todo => todo.path && sameTodoPath(todo.path, readPath));
@@ -1055,7 +1645,58 @@ No narration. No run_shell. No create_dir.`,
               });
               await persistAgentState();
               shouldStopAgent = nextCount >= 4;
+              if (shouldStopAgent) await updateRunState(RUN_STATE_STUCK, `read_loop:${readPath}`);
               break;
+            }
+          }
+          if (toolName === 'file_state') {
+            const trackedPaths = Array.isArray(args.paths) && args.paths.length
+              ? args.paths.map(p => String(p))
+              : (args.path ? [String(args.path)] : []);
+            if (trackedPaths.length > 0) {
+              const normalizedPaths = trackedPaths
+                .map(p => normalizeTodoPath(p, workspace))
+                .filter(Boolean)
+                .map(p => p.toLowerCase())
+                .sort();
+              const pendingTargets = getPendingTodos(taskTodos)
+                .filter(todo => todo.path)
+                .map(todo => String(todo.path).toLowerCase());
+              const readsPendingTarget = normalizedPaths.some(path => pendingTargets.includes(path));
+              if (readsPendingTarget) {
+                const repeatKey = `state:${normalizedPaths.join('|')}`;
+                const repeatCount = (readRepeatFingerprints.get(repeatKey) || 0) + 1;
+                readRepeatFingerprints.set(repeatKey, repeatCount);
+                agentState.actionFingerprints = agentState.actionFingerprints || {};
+                agentState.actionFingerprints.readRepeats = Object.fromEntries(readRepeatFingerprints.entries());
+                if (repeatCount >= 3) {
+                  const firstPending = getPendingTodos(taskTodos).find(todo => todo.path) || getPendingTodos(taskTodos)[0];
+                  const targetPath = firstPending?.path || trackedPaths[0];
+                  const reason = `file_state was repeated ${repeatCount} times on the same pending file set without a write/edit action.`;
+                  addActivity({
+                    kind: 'read',
+                    status: 'error',
+                    title: 'File-state loop blocked',
+                    subtitle: shortPath(targetPath || trackedPaths[0]),
+                    detail: { tool: 'file_state', status: 'blocked', error: reason, paths: trackedPaths },
+                  });
+                  history.push({
+                    role: 'user',
+                    content: `${reason}
+Stop probing and write the target file now.
+Emit one complete <write_file path="${targetPath}"> block with full corrected content.
+No narration. No extra reads.`,
+                  });
+                  forceTextWriteOnly = true;
+                  await persistAgentState();
+                  if (repeatCount >= 5) {
+                    await updateRunState(RUN_STATE_STUCK, `file_state_loop:${targetPath || 'unknown'}`);
+                    appendBubble('error', `Agent stuck: repeated file_state reads without file edits (${repeatCount}x).`);
+                    shouldStopAgent = true;
+                  }
+                  break;
+                }
+              }
             }
           }
           if (toolName === 'read_file' && args.path) updateReadStateFromToolResult(agentState, args.path, toolResult);
@@ -1063,10 +1704,14 @@ No narration. No run_shell. No create_dir.`,
           if (['write_file', 'append_file', 'edit_file', 'replace_file_range', 'delete_file'].includes(toolName) && args.path) {
             updateReadStateFromToolResult(agentState, args.path, toolResult);
             recordFileHistory(agentState, args.path, toolName, toolResult, toolName === 'edit_file' ? args.new_string : args.content);
+            progressMade = progressMade || Boolean(toolResult.afterHash || toolResult.changed !== false || toolResult.afterBytes != null);
             const key = `read:${String(args.path).toLowerCase()}`;
             const repeatKey = `repeat:${String(args.path).toLowerCase()}`;
             readLoopFingerprints.delete(key);
             readRepeatFingerprints.delete(repeatKey);
+            for (const existingKey of [...readRepeatFingerprints.keys()]) {
+              if (existingKey.startsWith('state:')) readRepeatFingerprints.delete(existingKey);
+            }
             agentState.actionFingerprints = agentState.actionFingerprints || {};
             agentState.actionFingerprints.readLoops = Object.fromEntries(readLoopFingerprints.entries());
             agentState.actionFingerprints.readRepeats = Object.fromEntries(readRepeatFingerprints.entries());
@@ -1075,15 +1720,48 @@ No narration. No run_shell. No create_dir.`,
             const verification = await verifySpecificTodoFile(args.path, workspace);
             if (verification.ok) {
               markTodoDone(taskTodos, args.path, { kind: toolName, path: args.path, afterHash: toolResult.afterHash, bytes: toolResult.afterBytes });
+              progressMade = true;
             } else {
               markTodoFailed(taskTodos, args.path, verification.error);
             }
           }
           if (toolName === 'create_dir' && args.path && !toolResult.alreadyExists) {
             markTodoDone(taskTodos, args.path, { kind: 'create_dir', path: args.path });
+            progressMade = true;
           }
           if (toolName === 'edit_file') markRelatedTodosDone(taskTodos, args.path, args.new_string || '');
           if (toolName === 'replace_file_range') markRelatedTodosDone(taskTodos, args.path, args.content || '');
+          const runSnapshot = normalizeRunState(agentState.runState, workspace, agentState.sessionId);
+          const pendingFileWork = getPendingTodos(taskTodos).some(todo => todo.path);
+          if (toolName === 'inspect_project' && pendingFileWork && !progressMade) {
+            const nextInspect = runSnapshot.lastToolName === 'inspect_project'
+              ? (runSnapshot.inspectWithoutProgress || 0) + 1
+              : 1;
+            agentState.runState = {
+              ...runSnapshot,
+              lastToolName: toolName,
+              inspectWithoutProgress: nextInspect,
+              updatedAt: new Date().toISOString(),
+            };
+            await persistAgentState();
+            if (nextInspect >= 3) {
+              await updateRunState(RUN_STATE_STUCK, 'repeated_inspect_project_without_progress');
+              appendBubble('error', 'Repeated inspect_project calls without file progress — stopping to avoid a loop.');
+              shouldStopAgent = true;
+              break;
+            }
+          } else if (progressMade) {
+            cycleMadeProgress = true;
+            await markProgress(`${toolName}:${args.path || args.root || args.pattern || ''}`, { lastToolName: toolName });
+          } else {
+            agentState.runState = {
+              ...runSnapshot,
+              lastToolName: toolName,
+              inspectWithoutProgress: toolName === 'inspect_project' ? (runSnapshot.inspectWithoutProgress || 0) + 1 : 0,
+              updatedAt: new Date().toISOString(),
+            };
+            await persistAgentState();
+          }
           refreshTodoView();
           await persistAgentState();
           // Show a brief success confirmation for write/shell tools
@@ -1098,6 +1776,10 @@ No narration. No run_shell. No create_dir.`,
             });
           }
           if (repeatedSuccesses >= 2 || (toolName === 'create_dir' && toolResult.alreadyExists)) {
+            await updateRunState(RUN_STATE_RECOVERING, `repeated_${toolName}_without_file_progress`);
+            if (toolName === 'inspect_project' && getPendingTodos(taskTodos).some(todo => todo.path)) {
+              forceTextWriteOnly = true;
+            }
             history.push({
               role: 'tool',
               tool_call_id: call.id,
@@ -1108,11 +1790,13 @@ No narration. No run_shell. No create_dir.`,
               content: `That ${toolName} action did not create new file content${toolResult.alreadyExists ? ' because the directory already existed' : ''}. Stop repeating it. Move to the first pending file todo now:\n${formatTodoListForPrompt(taskTodos)}\nUse a complete <write_file> block or another necessary tool call.`,
             });
             shouldStopAgent = repeatedSuccesses >= 3;
+            if (shouldStopAgent) await updateRunState(RUN_STATE_STUCK, `repeated_${toolName}_without_progress`);
             break;
           }
         }
       } else {
         toolResult = { ok: false, error: 'User declined this tool call.' };
+        await updateRunState(RUN_STATE_RECOVERING, `tool_declined:${toolName}`);
       }
 
       // Wrap result to guard against prompt injection
@@ -1122,11 +1806,92 @@ ${JSON.stringify(redactSuspiciousToolOutput(toolResult))}
 </tool_result>`;
       history.push({ role: 'tool', tool_call_id: call.id, content: wrappedContent });
     }
+    if (!abortRef.aborted && !shouldStopAgent) {
+      await updateRunState(RUN_STATE_EXECUTING, 'tool_calls_processed');
+    }
+
+    const pendingAfterCycle = getPendingTodos(taskTodos);
+    if (!abortRef.aborted && !shouldStopAgent && pendingAfterCycle.length === 0 && (cycleMadeProgress || cycleHadTextWrite)) {
+      const verification = await verifyTodoFiles(taskTodos, workspace);
+      if (!verification.ok) {
+        for (const item of verification.failed) markTodoFailed(taskTodos, item.path, item.error);
+        refreshTodoView();
+        await updateRunState(RUN_STATE_RECOVERING, 'post_cycle_verification_failed');
+        const firstFailed = verification.failed[0];
+        history.push({
+          role: 'user',
+          content: `Post-write verification failed for completed todos:
+${verification.failed.map(f => `- ${f.path}: ${f.error}`).join('\n')}
+Fix ONLY the failing file(s), starting with ${firstFailed?.path || 'the first failed file'}.
+Do not rewrite unrelated files. Emit one complete <write_file> block for that target file. No narration.`,
+        });
+        forceTextWriteOnly = true;
+        await persistAgentState();
+        continue;
+      }
+      const doneSummary = `Done. Verified ${taskTodos.filter(todo => todo.path).length} file todo${taskTodos.filter(todo => todo.path).length === 1 ? '' : 's'} in ${shortPath(workspace)}.`;
+      appendBubble('assistant', doneSummary);
+      history.push({ role: 'assistant', content: doneSummary });
+      await updateRunState(RUN_STATE_DONE, 'auto_verified_completion');
+      if (pendingThinkText) appendThinkingBlock(chat, pendingThinkText);
+      ipcRenderer.removeListener('stream-chunk', onStreamChunk);
+      if (todoState) todoState.items = taskTodos;
+      await persistAgentState();
+      history = await trimHistory(history);
+      return history.filter(m => !(m.role === 'system' && (
+        String(m.content || '').startsWith('You are a coding assistant') ||
+        String(m.content || '').startsWith('You are LLM Cluster Code Agent') ||
+        String(m.content || '').startsWith('You are Code Agent')
+      )));
+    }
+
+    const pendingFileTodos = getPendingTodos(taskTodos).filter(todo => todo.path);
+    if (!abortRef.aborted && !shouldStopAgent && pendingFileTodos.length > 0) {
+      if (!cycleMadeProgress && (cycleHadToolCalls || cycleHadTextWrite)) {
+        consecutiveNoProgressCycles += 1;
+        const firstPending = stageContext?.firstMissingTodo?.path
+          ? stageContext.firstMissingTodo
+          : pendingFileTodos[0];
+        if (consecutiveNoProgressCycles >= 2) {
+          forceTextWriteOnly = true;
+          history.push({
+            role: 'user',
+            content: `No verified file progress was made in the last step.
+Now complete exactly one file todo before anything else:
+${firstPending?.title || 'Create/update pending file'}${firstPending?.path ? ` (${firstPending.path})` : ''}
+Respond with one complete <write_file path="${firstPending?.path || workspace + '/index.html'}"> block only. No narration and no tool calls.`,
+          });
+        }
+        if (consecutiveNoProgressCycles >= 4) {
+          await updateRunState(RUN_STATE_STUCK, 'repeated_no_progress_cycles');
+          appendBubble('error', `Agent stuck: no verified file progress after ${consecutiveNoProgressCycles} consecutive cycles.`);
+          shouldStopAgent = true;
+        }
+      } else if (cycleMadeProgress) {
+        consecutiveNoProgressCycles = 0;
+      }
+    } else {
+      consecutiveNoProgressCycles = 0;
+    }
+
+    history = await trimHistory(history);
+  }
+
+  if (abortRef.aborted) {
+    await updateRunState(RUN_STATE_IDLE, 'aborted_by_user');
+  } else {
+    const finalRunState = normalizeRunState(agentState.runState, workspace, agentState.sessionId);
+    if (shouldStopAgent && finalRunState.status !== RUN_STATE_STUCK) {
+      await updateRunState(RUN_STATE_STUCK, 'stopped_before_completion');
+    } else if (!shouldStopAgent && [RUN_STATE_EXECUTING, RUN_STATE_WAITING_TOOL, RUN_STATE_RECOVERING].includes(finalRunState.status)) {
+      await updateRunState(RUN_STATE_IDLE, 'turn_ended_without_final_response');
+    }
   }
 
   ipcRenderer.removeListener('stream-chunk', onStreamChunk);
   if (todoState) todoState.items = taskTodos;
   await persistAgentState();
+  history = await trimHistory(history);
   return history;
 }
 
@@ -1161,7 +1926,6 @@ function selectToolsForPhase(tools, todos, stageContext = { name: 'general' }) {
     'read_file',
     'read_many_files',
     'file_state',
-    'inspect_project',
     'list_dir',
     'glob',
     'grep',
@@ -1175,7 +1939,7 @@ function selectToolsForPhase(tools, todos, stageContext = { name: 'general' }) {
     const name = tool.function?.name || tool.name;
     if (TEXT_WRITE_TOOLS.has(name) || DISABLED_MODEL_TOOLS.has(name)) return false;
     if (!pendingFileTodos) return true;
-    if (stageContext.name === 'create_files') return readOnlyFilePrepTools.has(name);
+    if (stageContext.name === 'create_files') return name !== 'inspect_project' && readOnlyFilePrepTools.has(name);
     if (stageContext.name === 'edit_existing_files') return editCapableTools.has(name);
     return readOnlyFilePrepTools.has(name);
   });
@@ -1239,28 +2003,49 @@ function buildAgentStateReplay(agentState, todos, workspace, stageContext = null
   const files = (agentState.fileHistory || []).slice(-12);
   const failures = files.filter(f => !f.ok).slice(-5);
   const changed = files.filter(f => f.ok && f.changed !== false).slice(-8);
+  const approvedPlan = String(agentState.lastApprovedPlan || '').trim();
+  const runState = normalizeRunState(agentState.runState, workspace, agentState.sessionId);
+  const ledgerEntries = Object.entries(agentState.symbolLedger || {})
+    .sort((a, b) => new Date(b[1]?.updatedAt || 0) - new Date(a[1]?.updatedAt || 0))
+    .slice(0, 8);
   const parts = [
     `APP STATE REPLAY (authoritative, not model memory). Workspace: ${workspace}`,
   ];
+  parts.push(`Run state: status=${runState.status} reason=${runState.lastReason || 'n/a'} transitions=${runState.transitionCount} progress=${runState.progressCount}`);
   if (stageContext) parts.push(formatStageHint(stageContext));
   if (doneTodos.length) parts.push(`Verified done:\n${doneTodos.map(t => `- ${t.title}${t.path ? ` (${t.path})` : ''}${t.evidence?.afterHash ? ` hash=${String(t.evidence.afterHash).slice(0, 12)}` : ''}`).join('\n')}`);
   if (pendingTodos.length) parts.push(`Pending/failed:\n${pendingTodos.map(t => `- [${t.status}] ${t.title}${t.path ? ` (${t.path})` : ''}${t.error ? ` error=${t.error}` : ''}`).join('\n')}`);
   if (changed.length) parts.push(`Recent verified file changes:\n${changed.map(f => `- ${f.action} ${f.path} ok=${f.ok} bytes=${f.afterBytes ?? '?'} hash=${String(f.afterHash || '').slice(0, 12)}${f.repairedDirectory ? ' repaired-empty-directory=true' : ''}`).join('\n')}`);
   if (failures.length) parts.push(`Latest failed actions to avoid/recover:\n${failures.map(f => `- ${f.action} ${f.path}: ${f.error}`).join('\n')}`);
+  if (approvedPlan) {
+    parts.push(`Approved plan snapshot (summarized):\n${approvedPlan.split('\n').slice(0, 36).join('\n')}`);
+  }
+  if (ledgerEntries.length) {
+    parts.push(`Project symbol ledger (keep names consistent):\n${ledgerEntries.map(([p, s]) => {
+      const vars = (s.vars || []).slice(0, 8).join(', ');
+      const funcs = (s.funcs || []).slice(0, 6).join(', ');
+      const ids = (s.ids || []).slice(0, 8).join(', ');
+      return `- ${shortPath(p)} vars=[${vars}] funcs=[${funcs}] ids=[${ids}]`;
+    }).join('\n')}`);
+  }
   parts.push('Use this replay to resume. Do not recreate existing workspace folders. Do not mark files done unless the app verifies the actual target file.');
   return parts.join('\n\n');
 }
 
 function normalizeAgentState(state, workspace) {
+  const session = state?.sessionId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   return {
     version: 1,
-    sessionId: state?.sessionId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    sessionId: session,
     workspace,
     updatedAt: state?.updatedAt || new Date().toISOString(),
     todos: Array.isArray(state?.todos) ? state.todos : [],
     fileHistory: Array.isArray(state?.fileHistory) ? state.fileHistory.slice(-200) : [],
     readState: state?.readState && typeof state.readState === 'object' ? state.readState : {},
+    lastApprovedPlan: typeof state?.lastApprovedPlan === 'string' ? state.lastApprovedPlan : '',
+    symbolLedger: state?.symbolLedger && typeof state.symbolLedger === 'object' ? state.symbolLedger : {},
     actionFingerprints: state?.actionFingerprints && typeof state.actionFingerprints === 'object' ? state.actionFingerprints : {},
+    runState: normalizeRunState(state?.runState, workspace, session),
   };
 }
 
@@ -1304,6 +2089,10 @@ function updateReadStateFromToolResult(agentState, path, toolResult) {
 
 function attachAgentStateToToolArgs(toolName, args, agentState) {
   const next = { ...(args || {}) };
+  const todoPaths = (agentState?.todos || []).map(todo => todo.path).filter(Boolean);
+  if (todoPaths.length > 0 && ['read_file', 'read_many_files', 'file_state'].includes(toolName)) {
+    next.allowedTodoFilePaths = todoPaths;
+  }
   if (toolName === 'read_many_files') {
     next.readSnapshots = {};
     for (const path of next.paths || []) {
@@ -1313,6 +2102,10 @@ function attachAgentStateToToolArgs(toolName, args, agentState) {
     return next;
   }
   if (toolName === 'create_dir') {
+    next.knownTodoFilePaths = (agentState?.todos || []).map(todo => todo.path).filter(Boolean);
+    return next;
+  }
+  if (toolName === 'run_shell') {
     next.knownTodoFilePaths = (agentState?.todos || []).map(todo => todo.path).filter(Boolean);
     return next;
   }
@@ -1350,6 +2143,79 @@ function recordFileHistory(agentState, path, action, toolResult, preview = '') {
     timestamp: new Date().toISOString(),
   };
   agentState.fileHistory = [...(agentState.fileHistory || []), entry].slice(-200);
+}
+
+function updateSymbolLedger(agentState, filePath, content) {
+  if (!agentState || !filePath || !looksLikeSourcePath(filePath)) return;
+  const text = String(content || '');
+  if (!text.trim()) return;
+
+  const ids = new Set();
+  const classes = new Set();
+  const vars = new Set();
+  const funcs = new Set();
+
+  for (const m of text.matchAll(/\bid\s*=\s*['"]([^'"]+)['"]/gi)) ids.add(m[1]);
+  for (const m of text.matchAll(/\bclass\s*=\s*['"]([^'"]+)['"]/gi)) {
+    m[1].split(/\s+/).filter(Boolean).forEach(cls => classes.add(cls));
+  }
+  for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g)) vars.add(m[1]);
+  for (const m of text.matchAll(/\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)) funcs.add(m[1]);
+  for (const m of text.matchAll(/\bexport\s+(?:default\s+)?(?:function\s+)?([A-Za-z_$][A-Za-z0-9_$]*)?/g)) {
+    if (m[1]) vars.add(m[1]);
+  }
+
+  agentState.symbolLedger = agentState.symbolLedger || {};
+  agentState.symbolLedger[String(filePath)] = {
+    ids: [...ids].slice(0, 80),
+    classes: [...classes].slice(0, 120),
+    vars: [...vars].slice(0, 120),
+    funcs: [...funcs].slice(0, 80),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeMutationToolResultEnvelope(toolName, args, toolResult) {
+  if (!MUTATION_TOOLS.has(toolName)) return toolResult;
+  const base = toolResult && typeof toolResult === 'object'
+    ? { ...toolResult }
+    : { ok: false, error: `${toolName} returned an invalid result payload` };
+  const path = args?.path || base.path || '';
+  if (!path) {
+    return {
+      ok: false,
+      error: `${toolName} result missing path in mutation envelope`,
+      invalidEnvelope: true,
+      tool: toolName,
+    };
+  }
+
+  base.tool = toolName;
+  base.path = String(path);
+  base.beforeHash = base.beforeHash ?? null;
+  base.afterHash = base.afterHash ?? null;
+  if (base.beforeBytes == null && base.previousBytes != null) base.beforeBytes = base.previousBytes;
+  if (base.afterBytes == null && base.bytes != null) base.afterBytes = base.bytes;
+  base.beforeBytes = Number.isFinite(Number(base.beforeBytes)) ? Number(base.beforeBytes) : null;
+  base.afterBytes = Number.isFinite(Number(base.afterBytes)) ? Number(base.afterBytes) : null;
+  base.mtimeMs = Number.isFinite(Number(base.mtimeMs)) ? Number(base.mtimeMs) : null;
+  base.repairedDirectory = Boolean(base.repairedDirectory);
+  if (typeof base.changed !== 'boolean') {
+    if (toolName === 'create_dir') base.changed = !Boolean(base.alreadyExists);
+    else if (toolName === 'delete_file') base.changed = true;
+    else if (base.beforeBytes != null && base.afterBytes != null) base.changed = base.beforeBytes !== base.afterBytes;
+    else base.changed = Boolean(base.ok);
+  }
+  if (!base.ok) base.changed = false;
+  if (toolName === 'delete_file') {
+    base.afterHash = null;
+    if (base.afterBytes == null) base.afterBytes = 0;
+  }
+  if (toolName === 'create_dir') {
+    base.beforeHash = null;
+    base.afterHash = null;
+  }
+  return base;
 }
 
 /** Returns true if the user needs to approve this call. */
@@ -1397,14 +2263,41 @@ function showApprovalCard({ chat, toolName, args, risk, call, remembered }) {
 async function executeTextWriteBlock(block, workspace, agentState = null) {
   const lines = block.content.split('\n');
   const chunks = chunkFileContent(block.content);
-  const firstTool = block.tool === 'append_file' ? 'append_file' : 'write_file';
+  let targetExisted = false;
+  let targetWasDirectory = false;
+  try {
+    const state = await ipcRenderer.invoke('agent:get-file-state', { path: block.path, workspace });
+    targetExisted = Boolean(state?.ok && state.snapshot?.isFile);
+    targetWasDirectory = Boolean(state?.ok && state.snapshot?.isDirectory);
+  } catch {}
+
+  // Deterministic create-vs-edit routing:
+  // - missing target always starts with write_file (create)
+  // - existing target honors append/write intent
+  const routedCreateFromAppend = !targetExisted && block.tool === 'append_file';
+  const firstTool = targetExisted ? (block.tool === 'append_file' ? 'append_file' : 'write_file') : 'write_file';
   const firstContent = chunks[0] || '';
   let readSnapshot = getReadSnapshot(agentState, block.path);
+  if (targetExisted && firstTool === 'write_file' && (!readSnapshot || !readSnapshot.isFullRead)) {
+    // Existing file overwrites require a fresh full snapshot to pass stale-write checks.
+    try {
+      const preRead = await ipcRenderer.invoke('agent:run-tool', {
+        tool: 'read_file',
+        args: { path: block.path, offset: 1, limit: 5000 },
+        workspace,
+      });
+      if (preRead?.ok && preRead.snapshot?.isFullRead) {
+        readSnapshot = { ...preRead.snapshot, path: block.path };
+        if (agentState?.readState) agentState.readState[block.path] = readSnapshot;
+      }
+    } catch {}
+  }
   let result = await ipcRenderer.invoke('agent:run-tool', {
     tool: firstTool,
     args: { path: block.path, content: firstContent, ...(readSnapshot ? { readSnapshot } : {}) },
     workspace,
   });
+  result = normalizeMutationToolResultEnvelope(firstTool, { path: block.path }, result);
   const firstResult = result;
   if (result.ok) {
     readSnapshot = snapshotFromToolResult(block.path, result);
@@ -1420,6 +2313,7 @@ async function executeTextWriteBlock(block, workspace, agentState = null) {
       },
       workspace,
     });
+    result = normalizeMutationToolResultEnvelope('append_file', { path: block.path }, result);
     if (result.ok) readSnapshot = snapshotFromToolResult(block.path, result);
   }
 
@@ -1431,6 +2325,10 @@ async function executeTextWriteBlock(block, workspace, agentState = null) {
     previousBytes: firstResult.previousBytes,
     unchanged: firstResult.unchanged,
     repairedDirectory: firstResult.repairedDirectory,
+    path: block.path,
+    routedCreateFromAppend,
+    targetExistedBeforeWrite: targetExisted,
+    targetWasDirectoryBeforeWrite: targetWasDirectory,
   };
 }
 
@@ -1461,7 +2359,7 @@ function chunkFileContent(content) {
 function extractTextWriteBlocks(text, history = [], todos = []) {
   const blocks = [];
 
-  const xmlRe = /<(write_file|append_file)\s+path=(["'])([^"']+)\2>([\s\S]*?)<\/\1>/g;
+  const xmlRe = /(?:^|\n)\s*<(write_file|append_file)\s+path=(["'])([^"']+)\2>\s*\n?([\s\S]*?)\n?\s*<\/\1>\s*(?=\n|$)/g;
   for (const match of text.matchAll(xmlRe)) {
     blocks.push({
       tool: match[1],
@@ -1506,7 +2404,7 @@ function extractTextWriteBlocks(text, history = [], todos = []) {
 }
 
 function stripTextWriteBlocks(text, history = [], todos = []) {
-  let stripped = text.replace(/<(write_file|append_file)\s+path=(["'])([^"']+)\2>[\s\S]*?<\/\1>/g, '');
+  let stripped = text.replace(/(?:^|\n)\s*<(write_file|append_file)\s+path=(["'])([^"']+)\2>\s*\n?[\s\S]*?\n?\s*<\/\1>\s*(?=\n|$)/g, '');
   stripped = stripped.replace(/<<<FILE\s+path=(["'])([^"']+)\1(?:\s+mode=(["']?)(write|append)\3)?\s*\n[\s\S]*?\n?<<<END_FILE/g, '');
   const blocks = extractTextWriteBlocks(stripped, history, todos);
   for (const block of blocks) {
@@ -1516,7 +2414,7 @@ function stripTextWriteBlocks(text, history = [], todos = []) {
 }
 
 function findIncompleteTextWriteBlock(text) {
-  const openRe = /<(write_file|append_file)\s+path=(["'])([^"']+)\2>/g;
+  const openRe = /(?:^|\n)\s*<(write_file|append_file)\s+path=(["'])([^"']+)\2>/g;
   let match;
   let last = null;
   while ((match = openRe.exec(text)) !== null) {
@@ -1530,7 +2428,12 @@ function findIncompleteTextWriteBlock(text) {
   if (last) {
     const afterOpen = text.slice(last.index + last.openTag.length);
     const closeTag = `</${last.tool}>`;
-    if (!afterOpen.includes(closeTag)) return last;
+    if (!afterOpen.includes(closeTag)) {
+      // Ignore instructional mentions like:
+      // "Start with <write_file path="..."> then ..."
+      if (isLikelyInstructionalWriteTag(text, last)) return null;
+      return last;
+    }
   }
 
   const fileStartRe = /<<<FILE\s+path=(["'])([^"']+)\1(?:\s+mode=(["']?)(write|append)\3)?\s*\n/g;
@@ -1546,6 +2449,19 @@ function findIncompleteTextWriteBlock(text) {
   }
   if (!lastFile) return null;
   return text.slice(lastFile.index + lastFile.openTag.length).includes('<<<END_FILE') ? null : lastFile;
+}
+
+function isLikelyInstructionalWriteTag(text, incomplete) {
+  const afterOpen = text.slice(incomplete.index + incomplete.openTag.length);
+  const tail = afterOpen.slice(0, 260);
+  const around = text.slice(Math.max(0, incomplete.index - 140), Math.min(text.length, incomplete.index + 260)).toLowerCase();
+  const tailTrim = tail.trim().toLowerCase();
+  if (!tailTrim) return true;
+  if (tailTrim.length < 80) return true;
+  if (/^(?:then|and then|next|close|closing|use|emit|start|do not|no narration)\b/.test(tailTrim)) return true;
+  if (/start with\s+<write_file|start with\s+<append_file|example|closing tag|xml tags?|tool calls?/.test(around)) return true;
+  if (/^<\/?(write_file|append_file)\b/.test(tailTrim)) return true;
+  return false;
 }
 
 function extractIncompleteWriteContent(text, incompleteWrite) {
@@ -1579,6 +2495,9 @@ function inferCodeBlockFilename(text, match, history = []) {
 }
 
 function looksLikeSourcePath(pathLike) {
+  const raw = String(pathLike || '').trim();
+  if (!raw) return false;
+  if (/^(?:https?:)?\/\//i.test(raw) || /^[a-z]+:\/\//i.test(raw)) return false;
   return /\.(html?|css|js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|json|yaml|yml|md|txt|sh|env|toml|xml|svg)$/i.test(pathLike);
 }
 
@@ -1593,10 +2512,16 @@ function sanitizePlanForExecution(planText, messages, workspace) {
     paths.push(normalized);
   };
 
-  const pathRe = /(?:^|[\s"'`(])((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))/gi;
-  for (const match of source.matchAll(pathRe)) addPath(match[1]);
+  const manifestLines = extractPlanSectionLines(source, ['file manifest', 'manifest']);
+  const manifestText = manifestLines.join('\n');
+  for (const pathValue of extractPathsFromText(manifestText, workspace)) addPath(pathValue);
 
-  const taskText = messages.map(m => m.content || '').join('\n');
+  // Fallback when plan had no clear manifest section.
+  if (paths.length === 0) {
+    for (const pathValue of extractPathsFromText(source, workspace)) addPath(pathValue);
+  }
+
+  const taskText = getLatestUserPrompt(messages);
   if (paths.length === 0 && /website|web app|clone|simulator|html|css|javascript|frontend/i.test(taskText + '\n' + source)) {
     addPath(`${workspace}/index.html`);
     addPath(`${workspace}/style.css`);
@@ -1606,28 +2531,43 @@ function sanitizePlanForExecution(planText, messages, workspace) {
     addPath(`${workspace}/style.css`);
   }
   if (paths.length === 0) return '';
-  return paths.slice(0, 8).map((path, index) => `${index + 1}. ${path} — create or update this file`).join('\n');
+  return paths.slice(0, 24).map((path, index) => `${index + 1}. ${path} — create or update this file`).join('\n');
 }
 
-function createTaskTodoList(messages, approvedPlan, workspace) {
-  const source = [approvedPlan, messages.map(m => m.content || '').join('\n')].filter(Boolean).join('\n');
+function createTaskTodoList(messages, approvedPlan, workspace, options = {}) {
+  const planSource = String(approvedPlan || '');
+  const recentUserSource = getLatestUserPrompt(messages);
+  const source = [planSource, recentUserSource].filter(Boolean).join('\n');
+  const frontendOnly = options.frontendOnlyHint === true || isFrontendOnlyTask(source);
   const todos = [];
   const seen = new Set();
+  const isAllowedPath = (candidatePath) => {
+    if (!candidatePath) return false;
+    if (!frontendOnly) return true;
+    return !isLikelyBackendPath(candidatePath, workspace);
+  };
 
-  const planLines = String(approvedPlan || '')
+  const planLines = planSource
     .split('\n')
     .map(line => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim())
     .filter(line => line.length > 8);
+  const manifestLines = extractPlanSectionLines(planSource, ['file manifest', 'manifest']);
+  const primaryPlanLines = manifestLines.length
+    ? manifestLines
+    : planLines;
 
-  for (const line of planLines) {
+  for (const line of primaryPlanLines) {
     const filePath = extractFirstPath(line, workspace);
-    if (filePath) addTodo(todos, seen, `Create or update ${shortPath(filePath)}`, filePath);
+    if (filePath && isAllowedPath(filePath)) addTodo(todos, seen, `Create or update ${shortPath(filePath)}`, filePath);
   }
 
-  const pathRe = /(?:^|[\s"'`(])((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))/gi;
-  for (const match of source.matchAll(pathRe)) {
-    const filePath = normalizeTodoPath(match[1].replace(/[.,;:]+$/, ''), workspace);
-    addTodo(todos, seen, `Create or update ${shortPath(filePath)}`, filePath);
+  // If an approved plan already gave concrete file paths, keep scope strict to that set.
+  if (todos.length === 0) {
+    for (const filePath of extractPathsFromText(source, workspace)) {
+      if (!filePath) continue;
+      if (!isAllowedPath(filePath)) continue;
+      addTodo(todos, seen, `Create or update ${shortPath(filePath)}`, filePath);
+    }
   }
 
   if (/tailwind/i.test(source) && !todos.some(t => /tailwind/i.test(t.title) || /tailwind/i.test(t.path || ''))) {
@@ -1640,9 +2580,47 @@ function createTaskTodoList(messages, approvedPlan, workspace) {
     addTodo(todos, seen, 'Create or update index.html', `${workspace}/index.html`);
     addTodo(todos, seen, 'Create or update style.css', `${workspace}/style.css`);
     addTodo(todos, seen, 'Create or update script.js', `${workspace}/script.js`);
+    addTodo(todos, seen, 'Create or update data.js', `${workspace}/data.js`);
+    addTodo(todos, seen, 'Create or update README.md', `${workspace}/README.md`);
   }
 
   return todos;
+}
+
+function isLikelyBackendPath(filePath, workspace) {
+  const p = String(filePath || '').replace(/\\/g, '/').toLowerCase();
+  const ws = String(workspace || '').replace(/\\/g, '/').toLowerCase();
+  const rel = ws && p.startsWith(ws) ? p.slice(ws.length + 1) : p;
+  if (!rel) return false;
+  if (/(^|\/)(backend|server|api|routes|controllers|models|migrations|seeds|db|database)\//.test(rel)) return true;
+  if (/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|dockerfile|docker-compose\.ya?ml)$/.test(rel)) return true;
+  if (/\.(sql|sqlite|db|prisma)$/i.test(rel)) return true;
+  return false;
+}
+
+function isTodoStatePoisoned(todos, workspace) {
+  if (!Array.isArray(todos) || todos.length === 0) return false;
+  const pendingWithPath = todos.filter(todo => todo?.status !== 'done' && todo?.path);
+  const basenameMap = new Map();
+  for (const todo of pendingWithPath) {
+    const rawPath = String(todo.path || '');
+    if (!rawPath) continue;
+    if (/\n|##|implementation plan|file manifest|todos|\*\*|<[^>]+>/i.test(rawPath)) return true;
+    const normalized = normalizeTodoPath(rawPath, workspace);
+    if (!normalized || !looksLikeSourcePath(normalized)) return true;
+    const base = normalized.split('/').pop()?.toLowerCase() || '';
+    if (!base) continue;
+    if (!basenameMap.has(base)) basenameMap.set(base, new Set());
+    basenameMap.get(base).add(normalized.toLowerCase());
+  }
+  for (const [, locations] of basenameMap.entries()) {
+    if (locations.size <= 1) continue;
+    const list = [...locations];
+    const hasJsDir = list.some(p => /\/js\//.test(p));
+    const hasRootLike = list.some(p => !/\/js\//.test(p));
+    if (hasJsDir && hasRootLike) return true;
+  }
+  return false;
 }
 
 function pruneTodoListForFileWork(todos, workspace) {
@@ -1660,30 +2638,61 @@ function pruneTodoListForFileWork(todos, workspace) {
   const kept = hasFileTodos
     ? normalized.filter(todo => todo.path)
     : normalized.slice(0, 5);
-  return kept.map((todo, index) => ({ ...todo, id: index + 1 }));
+  return kept
+    .slice(0, 24)
+    .map((todo, index) => ({ ...todo, id: index + 1 }));
 }
 
 function mergeTodoState(todoState, freshTodos) {
   const existing = Array.isArray(todoState?.items) ? todoState.items : [];
-  if (existing.length === 0) {
-    if (todoState) todoState.items = freshTodos;
-    return freshTodos;
+  const incoming = Array.isArray(freshTodos) ? freshTodos : [];
+
+  if (incoming.length === 0) {
+    if (todoState) todoState.items = existing;
+    return existing;
   }
 
-  const merged = existing.map(todo => ({ ...todo }));
-  const seen = new Set(merged.map(todo => todo.path || todo.title.toLowerCase()));
-  for (const todo of freshTodos) {
-    const key = todo.path || todo.title.toLowerCase();
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push({ ...todo, id: merged.length + 1 });
+  if (existing.length === 0) {
+    if (todoState) todoState.items = incoming;
+    return incoming;
+  }
+
+  const existingByKey = new Map();
+  for (const todo of existing) {
+    existingByKey.set(todoMergeKey(todo), todo);
+  }
+
+  const merged = incoming.map((todo, index) => {
+    const prior = existingByKey.get(todoMergeKey(todo));
+    if (!prior) return { ...todo, id: index + 1 };
+    const status = ['pending', 'in_progress', 'done', 'failed'].includes(prior.status) ? prior.status : 'pending';
+    return {
+      ...todo,
+      id: index + 1,
+      status,
+      error: status === 'failed' ? (prior.error || '') : '',
+      evidence: status === 'done' ? (prior.evidence || null) : null,
+    };
+  });
+
+  // Keep in-progress at most once.
+  let seenInProgress = false;
+  for (const todo of merged) {
+    if (todo.status === 'in_progress') {
+      if (seenInProgress) {
+        todo.status = 'pending';
+      } else {
+        seenInProgress = true;
+      }
     }
   }
+
   if (todoState) todoState.items = merged;
   return merged;
 }
 
 function addTodo(todos, seen, title, path) {
+  if (path && !looksLikeSourcePath(path)) return;
   const key = path || title.toLowerCase();
   if (seen.has(key)) return;
   seen.add(key);
@@ -1691,17 +2700,120 @@ function addTodo(todos, seen, title, path) {
 }
 
 function extractFirstPath(text, workspace) {
-  const match = String(text || '').match(/((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))/i);
+  const match = String(text || '').match(/((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))(?=$|[\s"'`()<>:,;])/i);
   return match ? normalizeTodoPath(match[1].replace(/[.,;:]+$/, ''), workspace) : null;
+}
+
+function extractPlanSectionLines(planText, headings = []) {
+  const lines = String(planText || '').split('\n');
+  const target = headings.map(h => String(h || '').toLowerCase().trim()).filter(Boolean);
+  if (target.length === 0) return [];
+  const out = [];
+  let collecting = false;
+  for (const rawLine of lines) {
+    const line = String(rawLine || '');
+    const headingMatch = line.match(/^\s*#{2,4}\s+(.+?)\s*$/);
+    if (headingMatch) {
+      const normalized = headingMatch[1].toLowerCase().trim();
+      const isTarget = target.some(h => normalized.includes(h));
+      if (isTarget) {
+        collecting = true;
+        continue;
+      }
+      if (collecting) break;
+      continue;
+    }
+    if (collecting) out.push(line);
+  }
+  return out
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
+}
+
+function extractPathsFromText(text, workspace) {
+  const out = [];
+  const seen = new Set();
+  const pathRe = /(?:^|[\s"'`(])((?:\/|[A-Za-z]:\\)?[^\s"'`()<>]+\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))(?=$|[\s"'`()<>:,;])/gi;
+  for (const match of String(text || '').matchAll(pathRe)) {
+    const filePath = normalizeTodoPath(String(match[1] || '').replace(/[.,;:]+$/, ''), workspace);
+    if (!filePath || !looksLikeSourcePath(filePath) || seen.has(filePath)) continue;
+    seen.add(filePath);
+    out.push(filePath);
+  }
+  return out;
 }
 
 function normalizeTodoPath(path, workspace) {
   let p = String(path || '').trim();
+  if (!p) return '';
+  p = p.replace(/^['"`\s]+|['"`\s]+$/g, '');
+  p = p.replace(/\\/g, '/');
+  // Recover from malformed merges like "file.js3." where a list item index
+  // was accidentally concatenated to the path by the model.
+  p = p.replace(/(\.(?:html?|css|js|ts|jsx|tsx|py|json|md|txt|sh|yml|yaml|toml|svg|xml))\d+\.?$/i, '$1');
+  if (/^(?:https?:)?\/\//i.test(p) || /[a-z][a-z0-9+.-]*:\/\//i.test(p)) return '';
+  if (/https?:\/\//i.test(p) || /\/www\./i.test(p)) return '';
+  if (workspace && workspace.startsWith('/') && /^[A-Za-z]:\//.test(p)) return '';
+  if (workspace && /^[A-Za-z]:[\\/]/.test(workspace) && p.startsWith('/')) return '';
   if (workspace && p && !p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p)) {
     p = stripWorkspaceEchoPrefix(p, workspace);
   }
   if (workspace && p && !p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p)) p = `${workspace}/${p.replace(/^\.?\//, '')}`;
+  p = p.replace(/\/+/g, '/');
+  if (workspace && p.startsWith('/')) {
+    const wsNorm = workspace.replace(/\\/g, '/').replace(/\/+$/g, '');
+    if (!p.startsWith(wsNorm)) return '';
+  }
+  if (/[a-z][a-z0-9+.-]*:\/\//i.test(p)) return '';
   return p;
+}
+
+function getLatestUserPrompt(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.role === 'user' && typeof m.content === 'string') return m.content;
+  }
+  return '';
+}
+
+function isContinuationPrompt(prompt) {
+  const p = String(prompt || '').toLowerCase();
+  if (!p) return false;
+  return /\b(continue|go on|resume|carry on|keep going|try again|retry|pick up|finish this|fix this|fix it|fix that)\b/.test(p);
+}
+
+function isPlanUpdatePrompt(prompt) {
+  const p = String(prompt || '').toLowerCase().trim();
+  if (!p) return false;
+  if (isContinuationPrompt(p)) return false;
+  return /\b(update|revise|change|modify|adjust|rework|replan|re-prioritize|reprioritize)\b/.test(p)
+    && /\b(plan|todo|tasks|scope|requirements|manifest)\b/.test(p);
+}
+
+function isFrontendOnlyTask(text) {
+  const p = String(text || '').toLowerCase();
+  if (!p) return false;
+  const frontendHit = /\b(html|css|javascript|js|typescript|ts|jsx|tsx|frontend|website|web app|clone|copycat|localstorage|animation|ui)\b/.test(p);
+  const backendHit = /\b(api|backend|server|express|database|postgres|mysql|mongodb|redis|auth service|endpoint|route)\b/.test(p);
+  return frontendHit && !backendHit;
+}
+
+function shouldResetTaskStateFromPrompt(prompt, hasContinuationIntent = false) {
+  if (hasContinuationIntent) return false;
+  const p = String(prompt || '').toLowerCase().trim();
+  if (!p) return false;
+  // Strong signals of a fresh task request.
+  if (/\b(new chat|new project|from scratch)\b/.test(p)) return true;
+  if (/\b(create|build|make|generate|implement|develop)\b/.test(p) && /\b(website|app|demo|project|clone|copycat|tool)\b/.test(p)) return true;
+  if (/\bcreate\b/.test(p) && /\.([a-z0-9]{1,6})\b/.test(p)) return true;
+  return false;
+}
+
+function todoMergeKey(todo) {
+  if (todo?.path) {
+    return `path:${String(todo.path).replace(/\\/g, '/').toLowerCase()}`;
+  }
+  return `title:${String(todo?.title || '').trim().toLowerCase()}`;
 }
 
 function stripWorkspaceEchoPrefix(relativePath, workspace) {
@@ -1733,8 +2845,10 @@ function markTodoDone(todos, pathOrTitle, evidence = null) {
   todo.evidence = evidence || { kind: 'completed', path: pathOrTitle || null };
 }
 
-function markTodoFailed(todos, pathOrTitle, error) {
-  const todo = findTodoForTarget(todos, pathOrTitle) || addAdHocTodo(todos, pathOrTitle);
+function markTodoFailed(todos, pathOrTitle, error, opts = {}) {
+  const allowAdHoc = Boolean(opts.allowAdHoc);
+  const todo = findTodoForTarget(todos, pathOrTitle) || (allowAdHoc ? addAdHocTodo(todos, pathOrTitle) : null);
+  if (!todo) return;
   todo.status = 'failed';
   todo.error = error || 'unknown error';
   todo.evidence = null;
@@ -2072,7 +3186,7 @@ function buildRepeatedPlainNudge(text, todos, workspace) {
     : '';
   const fileBlockInstruction = target
     ? `start with <write_file path="${target}">, write the complete real file contents, then close with </write_file>, or`
-    : 'identify the next concrete file path with inspect_project/read/list tools, then write it, or';
+    : 'identify the next concrete file path with read/file_state/list tools, then write it, or';
   return `You repeated the same progress-only message without doing work. Stop narrating and perform the next concrete action now.${directoryFileHint}
 First unfinished todo: ${first ? `${first.title}${target ? ` (${target})` : ''}` : 'unknown'}
 Valid next output:
@@ -2082,7 +3196,7 @@ Do not call run_shell or create_dir while file todos are pending. Do not say Don
 }
 
 function isTruncatedFinish(reason) {
-  return ['length', 'max_tokens', 'content_filter', 'context_length', 'truncated'].includes(String(reason).toLowerCase());
+  return ['length', 'max_tokens', 'content_filter', 'context_length', 'truncated', 'context_shift_disabled'].includes(String(reason).toLowerCase());
 }
 
 function sanitizeHistoryForTools(messages, activeTools = []) {
@@ -2147,6 +3261,50 @@ function extractToolCallsFromText(text, history = []) {
   }
   if (calls.length > 0) return calls;
 
+  // Pattern 2: legacy XML-ish tool calls emitted by weaker local models:
+  // <read_file>
+  // <parameter=path>/abs/path</parameter>
+  // </function>
+  // </tool_call>
+  const legacyTagRe = /<(read_file|read_many_files|file_state|list_dir|glob|grep|edit_file|replace_file_range|delete_file|run_shell)>\s*([\s\S]*?)(?:<\/\1>|<\/function>\s*<\/tool_call>|<\/tool_call>)/gi;
+  for (const m of text.matchAll(legacyTagRe)) {
+    const name = String(m[1] || '').trim();
+    if (!name || TEXT_WRITE_TOOLS.has(name)) continue;
+    const body = String(m[2] || '');
+    const args = {};
+    let foundParam = false;
+    for (const p of body.matchAll(/<parameter=([a-zA-Z0-9_]+)>\s*([\s\S]*?)\s*<\/parameter>/gi)) {
+      const key = String(p[1] || '').trim();
+      const value = String(p[2] || '').trim();
+      if (!key) continue;
+      foundParam = true;
+      if (key === 'args') {
+        const lines = value.split('\n').map(v => v.trim()).filter(Boolean);
+        args[key] = lines;
+      } else if ((key === 'paths') && /\n|,/.test(value)) {
+        args[key] = value.split(/\n|,/).map(v => v.trim()).filter(Boolean);
+      } else if (/^(?:true|false)$/i.test(value)) {
+        args[key] = value.toLowerCase() === 'true';
+      } else if (/^-?\d+$/.test(value)) {
+        args[key] = Number(value);
+      } else {
+        args[key] = value;
+      }
+    }
+    // Last-resort path extraction for malformed wrappers that only include raw path text.
+    if (!foundParam && name === 'read_file') {
+      const rawPath = body.split('\n').map(line => line.trim()).find(line => line && !line.startsWith('<') && !line.endsWith('>'));
+      if (rawPath) args.path = rawPath;
+    }
+    if (Object.keys(args).length === 0) continue;
+    calls.push({
+      id: `fallback_${idCounter++}`,
+      type: 'function',
+      function: { name, arguments: args },
+    });
+  }
+  if (calls.length > 0) return calls;
+
   return calls;
 }
 
@@ -2174,4 +3332,19 @@ function appendThinkingBlock(chat, text) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-module.exports = { runAgentTurn };
+module.exports = {
+  runAgentTurn,
+  __test: {
+    normalizeTodoPath,
+    createTaskTodoList,
+    sanitizePlanForExecution,
+    isContinuationPrompt,
+    isPlanUpdatePrompt,
+    isFrontendOnlyTask,
+    isTodoStatePoisoned,
+    shouldResetTaskStateFromPrompt,
+    getLatestUserPrompt,
+    findIncompleteTextWriteBlock,
+    extractToolCallsFromText,
+  },
+};
