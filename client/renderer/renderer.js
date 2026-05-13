@@ -48,6 +48,7 @@ const STORAGE_KEY      = 'llm-cluster-backend-url';
 const MODE_KEY         = 'llm-cluster-mode';
 const WORKSPACE_KEY    = 'llm-cluster-workspace';
 const APPROVAL_KEY     = 'llm-cluster-approval-mode';
+const TODO_SESSION_KEY = 'llm-cluster-todo-session-id';
 const DEFAULT_URL      = 'https://llm.tutorrev.live';
 
 urlInput.value = localStorage.getItem(STORAGE_KEY) || DEFAULT_URL;
@@ -67,6 +68,8 @@ let remembered    = new Set(); // "toolName:pathPrefix" approved this conversati
 let latestTodoDetail = 'No active todo list yet.';
 let todoState     = { items: [] };
 let activeRequestId = null;
+let todoSessionId = localStorage.getItem(TODO_SESSION_KEY) || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+localStorage.setItem(TODO_SESSION_KEY, todoSessionId);
 
 function updateSessionTokensDisplay() {
   sessionTokensEl.textContent = `in: ${sessionTokens.prompt} · out: ${sessionTokens.response}`;
@@ -107,8 +110,21 @@ async function loadWorkspaceTodoState() {
   try {
     const r = await ipcRenderer.invoke('agent:load-state', { workspace });
     if (r.ok && Array.isArray(r.state?.todos)) {
-      todoState.items = r.state.todos;
-      latestTodoDetail = formatTodoStateForPanel(todoState.items);
+      if (r.state?.sessionId && r.state.sessionId !== todoSessionId) {
+        todoState.items = [];
+        latestTodoDetail = 'No active todo list yet.';
+        return;
+      }
+      const items = r.state.todos;
+      const hasActiveTodos = items.some(item => item && item.status !== 'done');
+      if (!hasActiveTodos) {
+        todoState.items = [];
+        latestTodoDetail = 'No active todo list yet.';
+        if (items.length) await resetPersistedWorkspaceState();
+      } else {
+        todoState.items = items;
+        latestTodoDetail = formatTodoStateForPanel(todoState.items);
+      }
     }
   } catch {}
 }
@@ -429,6 +445,7 @@ async function sendCode(prompt) {
       abortRef,
       remembered,
       todoState,
+      sessionId: todoSessionId,
     });
   } catch (err) {
     ensurePlaceholderRemoved();
@@ -460,7 +477,25 @@ async function send() {
 
 // --- New Chat ---
 
-function newChat() {
+async function resetPersistedWorkspaceState() {
+  if (!workspace) return;
+  try {
+    await ipcRenderer.invoke('agent:save-state', {
+      workspace,
+      state: {
+        sessionId: todoSessionId,
+        todos: [],
+        fileHistory: [],
+        readState: {},
+        actionFingerprints: {},
+      },
+    });
+  } catch {}
+}
+
+async function newChat() {
+  todoSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  localStorage.setItem(TODO_SESSION_KEY, todoSessionId);
   history       = [];
   sessionTokens = { prompt: 0, response: 0 };
   remembered    = new Set();
@@ -475,7 +510,9 @@ function newChat() {
   activityPanel.classList.add('hidden');
   activityDetail.textContent = '';
   latestTodoDetail = 'No active todo list yet.';
+  updateTodoView(latestTodoDetail);
   stopBtn.classList.add('hidden');
+  await resetPersistedWorkspaceState();
   input.focus();
 }
 
@@ -483,7 +520,7 @@ function newChat() {
 
 sendBtn.addEventListener('click', send);
 pingBtn.addEventListener('click', ping);
-newChatBtn.addEventListener('click', newChat);
+newChatBtn.addEventListener('click', () => { void newChat(); });
 
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {

@@ -216,12 +216,14 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   console.log(`[job] tools=${job.tools?.length || 0} model=${job.model}`);
 
   let url, body;
+  let requestedMaxTokens = null;
   if (engine.openai) {
     url = `${engine.url}/v1/chat/completions`;
     const hasTools = job.tools && job.tools.length > 0;
     const maxTokens = isCodeAgent
       ? Number(process.env.LLM_CODE_MAX_TOKENS || 8192)
       : Number(process.env.LLM_CHAT_MAX_TOKENS || -1);
+    requestedMaxTokens = maxTokens;
     body = {
       model: job.model,
       messages,
@@ -351,6 +353,7 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   }
 
   let content, toolCalls, tokens, finishReason = null;
+  let streamMeta = null;
 
   if (engine.openai) {
     // --- SSE stream reader ---
@@ -425,7 +428,16 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     process.stdout.write('\n[stream end]\n');
 
     console.log(`[stream] sseEvents=${sseEventCount} finishReason=${finishReason} contentLen=${accumulated.length} toolCallsBuilt=${Object.keys(toolCallsMap).length} promptTokens=${promptTokens} completionTokens=${completionTokens}`);
-    if (sseErrors.length) console.error(`[stream] ${sseErrors.length} SSE error(s): ${sseErrors.join(' | ')}`);
+    if (sseErrors.length) {
+      const joined = sseErrors.join(' | ');
+      console.error(`[stream] ${sseErrors.length} SSE error(s): ${joined}`);
+      const contextShiftDisabled = /context shift is disabled/i.test(joined);
+      streamMeta = {
+        errors: sseErrors.slice(-3),
+        contextShiftDisabled,
+      };
+      if (contextShiftDisabled && !finishReason) finishReason = 'context_shift_disabled';
+    }
 
     content   = accumulated;
     const built = Object.values(toolCallsMap);
@@ -433,7 +445,13 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
 
     if (sseErrors.length && !content && !toolCalls) {
       const err = new Error(`${engine.type} stream error: ${sseErrors.join(' | ').slice(0, 500)}`);
-      err.payload = { retryable: true, stage: 'inference_stream', jobId: job.id, status: 'failed' };
+      err.payload = {
+        retryable: true,
+        stage: 'inference_stream',
+        jobId: job.id,
+        status: 'failed',
+        stream: streamMeta || null,
+      };
       throw err;
     }
 
@@ -449,7 +467,15 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       tokensPerSec: (completionTokens && elapsedSec > 0)
         ? Math.round((completionTokens / elapsedSec) * 10) / 10
         : null,
-    };
+      };
+    if (
+      Number.isFinite(requestedMaxTokens) &&
+      requestedMaxTokens > 0 &&
+      completionTokens >= requestedMaxTokens &&
+      (!finishReason || String(finishReason).toLowerCase() === 'stop')
+    ) {
+      finishReason = 'length';
+    }
   } else {
     const data = await res.json();
     toolCalls = data.message?.tool_calls || null;
@@ -474,6 +500,7 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
 
   const result = { content, tokens };
   if (finishReason) result.finish_reason = finishReason;
+  if (streamMeta) result.stream = streamMeta;
   if (toolCalls) result.tool_calls = toolCalls;
   return result;
 }

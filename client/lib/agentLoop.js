@@ -5,7 +5,6 @@ const { buildApprovalCard } = require('../renderer/components/approvalCard');
 const { getTool }       = require('./tools');
 
 const MAX_TOOL_CALLS = Infinity;
-const WRITE_CHUNK_LINES = 80;
 const WRITE_CHUNK_CHARS = 6000;
 
 // Tools that can never be auto-approved or remembered
@@ -136,7 +135,7 @@ async function runAgentTurn(opts) {
     backendUrl, messages, model, tools,
     workspace, approvalMode, planMode,
     chat, appendBubble, appendActivity, updateTodoView, setLoading,
-    abortRef, remembered, todoState, requestId,
+    abortRef, remembered, todoState, requestId, sessionId,
   } = opts;
   const addActivity = (activity) => {
     if (typeof appendActivity === 'function') return appendActivity(activity);
@@ -175,7 +174,14 @@ async function runAgentTurn(opts) {
   let projectContext = null;
   try {
     const loaded = await ipcRenderer.invoke('agent:load-state', { workspace });
-    if (loaded.ok) agentState = normalizeAgentState(loaded.state, workspace);
+    if (loaded.ok) {
+      const loadedState = normalizeAgentState(loaded.state, workspace);
+      if (sessionId && loadedState.sessionId && loadedState.sessionId !== sessionId) {
+        agentState = normalizeAgentState({ sessionId }, workspace);
+      } else {
+        agentState = loadedState;
+      }
+    }
   } catch {}
   try {
     const ctx = await ipcRenderer.invoke('agent:get-project-context', { workspace });
@@ -189,12 +195,15 @@ async function runAgentTurn(opts) {
   agentState.todos = taskTodos;
   if (todoState) todoState.items = taskTodos;
   const persistAgentState = async () => {
+    if (sessionId) agentState.sessionId = sessionId;
     agentState.todos = taskTodos;
     agentState.updatedAt = new Date().toISOString();
     try { await ipcRenderer.invoke('agent:save-state', { workspace, state: agentState }); } catch {}
   };
   await persistAgentState();
   const failureFingerprints = new Map(Object.entries(agentState.actionFingerprints?.failures || {}));
+  const readLoopFingerprints = new Map(Object.entries(agentState.actionFingerprints?.readLoops || {}));
+  const readRepeatFingerprints = new Map(Object.entries(agentState.actionFingerprints?.readRepeats || {}));
   const toolCallNames = selectToolsForPhase(tools, taskTodos)
     .map(t => t.function?.name || t.name)
     .join(', ');
@@ -427,6 +436,20 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
         subtitle: r.jobId || r.error_details?.stage || '',
         detail: { status: 'failed', error: r.error, jobId: r.jobId || null, ...(r.error_details || {}) },
       });
+      const contextShiftDisabled = /context shift is disabled/i.test(String(r.error || '')) ||
+        /context shift is disabled/i.test(JSON.stringify(r.error_details || {}));
+      if (contextShiftDisabled) {
+        forceTextWriteOnly = true;
+        history.push({
+          role: 'user',
+          content: `llama.cpp interrupted generation because context shift is disabled. Continue from current file state using SMALL file blocks only (max 2000 chars each).
+If writing a file, emit one complete block per response and close it:
+<write_file path="ABSOLUTE_PATH">...</write_file> or <append_file path="ABSOLUTE_PATH">...</append_file>.
+Do not rewrite very large files in one response. Do not call JSON write tools.`,
+        });
+        await persistAgentState();
+        continue;
+      }
       await persistAgentState();
       break;
     }
@@ -552,6 +575,59 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
 
       const incompleteWrite = findIncompleteTextWriteBlock(data.response);
       if (incompleteWrite) {
+        const nearTokenCap = Number(data.tokens?.response || 0) >= 7900;
+        const contextShiftDisabled = Boolean(
+          data.stream?.contextShiftDisabled ||
+          String(data.finish_reason || '').toLowerCase() === 'context_shift_disabled',
+        );
+        if ((contextShiftDisabled || nearTokenCap) && incompleteWrite.path) {
+          const partial = extractIncompleteWriteContent(data.response, incompleteWrite);
+          const normalized = normalizeTextWriteBlockPath({
+            tool: incompleteWrite.tool,
+            path: incompleteWrite.path,
+            content: partial,
+          }, taskTodos, workspace);
+          if (normalized.ok && String(normalized.block.content || '').trim().length > 40) {
+            markTodoInProgress(taskTodos, normalized.block.path);
+            refreshTodoView();
+            const recovered = await executeTextWriteBlock(normalized.block, workspace, agentState);
+            if (recovered.ok) {
+              updateReadStateFromToolResult(agentState, normalized.block.path, recovered);
+              recordFileHistory(agentState, normalized.block.path, `${normalized.block.tool}_partial_recovery`, recovered, previewText(normalized.block.content));
+              addActivity({
+                kind: 'write',
+                status: 'success',
+                title: `Recovered partial chunk ${shortPath(normalized.block.path)}`,
+                subtitle: normalized.block.path,
+                detail: {
+                  path: normalized.block.path,
+                  tool: normalized.block.tool,
+                  status: 'written',
+                  lines: recovered.lines,
+                  chunks: recovered.chunks,
+                  afterHash: recovered.afterHash,
+                  afterBytes: recovered.afterBytes,
+                  preview: previewText(normalized.block.content),
+                  result: 'Recovered partial write after context-shift stream interruption.',
+                },
+              });
+              history.push({ role: 'assistant', content: stripLargeIncompleteWrite(data.response) });
+              history.push({
+                role: 'user',
+                content: `The previous response was interrupted${contextShiftDisabled ? ' by a llama.cpp stream error (context shift disabled)' : ' by hitting the output token limit'}. The already-written chunk for "${normalized.block.path}" was recovered.
+Continue by appending ONLY the next small chunk (max 2000 chars) with:
+<append_file path="${normalized.block.path}">
+...next chunk...
+</append_file>
+Do not rewrite the file from the top. Do not call JSON tools. End each block with its closing tag.`,
+              });
+              await persistAgentState();
+              incompleteWriteRetries = 0;
+              forceTextWriteOnly = true;
+              continue;
+            }
+          }
+        }
         incompleteWriteRetries++;
         if (incompleteWriteRetries > 2) {
           appendBubble('error', `Incomplete file write for ${incompleteWrite.path || 'unknown file'} repeated ${incompleteWriteRetries} times — stopping.`);
@@ -562,7 +638,7 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
         history.push({ role: 'assistant', content: stripLargeIncompleteWrite(data.response) });
         history.push({
           role: 'user',
-          content: `Your previous <${incompleteWrite.tool}> block${incompleteWrite.path ? ` for "${incompleteWrite.path}"` : ''} was cut off before the closing tag, so it was NOT written. Re-send that file now using only complete XML blocks. Prefer smaller chunks with actual absolute paths under "${workspace}". Do not use placeholder paths, JSON tools, or say Done.`,
+          content: `Your previous <${incompleteWrite.tool}> block${incompleteWrite.path ? ` for "${incompleteWrite.path}"` : ''} was cut off before the closing tag, so it was NOT written. Re-send using only COMPLETE XML blocks, and hard-chunk the file into small parts (max 2000 chars per block): first block must be <write_file>, remaining blocks must be <append_file> for the same path. End each block with its closing tag before sending anything else. Use actual absolute paths under "${workspace}". Do not use placeholder paths, JSON tools, or say Done.`,
         });
         continue;
       }
@@ -931,11 +1007,69 @@ ${projectContext?.summary ? `\n${projectContext.summary.slice(0, 12000)}\n` : ''
           await persistAgentState();
         } else {
           const repeatedSuccesses = recordSuccessfulAction(successfulActionFingerprints, toolName, args, toolResult);
+          if (toolName === 'read_file' && args.path) {
+            const readPath = String(args.path);
+            const hasPendingFileTodo = getPendingTodos(taskTodos).some(todo => todo.path && sameTodoPath(todo.path, readPath));
+            const relatedTodo = findTodoForTarget(taskTodos, readPath);
+            const unchangedRead = Boolean(toolResult.dedup);
+            const repeatKey = `repeat:${readPath.toLowerCase()}`;
+            const isPagedRead = Number(args.offset || 1) > 1 || Number(args.limit || 0) > 0;
+            const repeatCount = (readRepeatFingerprints.get(repeatKey) || 0) + 1;
+            readRepeatFingerprints.set(repeatKey, repeatCount);
+            agentState.actionFingerprints = agentState.actionFingerprints || {};
+            agentState.actionFingerprints.readRepeats = Object.fromEntries(readRepeatFingerprints.entries());
+            const key = `read:${readPath.toLowerCase()}`;
+            const nextCount = unchangedRead ? (readLoopFingerprints.get(key) || 0) + 1 : 0;
+            if (unchangedRead) readLoopFingerprints.set(key, nextCount);
+            else readLoopFingerprints.delete(key);
+            agentState.actionFingerprints = agentState.actionFingerprints || {};
+            agentState.actionFingerprints.readLoops = Object.fromEntries(readLoopFingerprints.entries());
+
+            const stuckOnFailedFile = hasPendingFileTodo && relatedTodo?.status === 'failed' && nextCount >= 2;
+            const stuckOnUnchangedRead = hasPendingFileTodo && nextCount >= 3;
+            const stuckOnRepeatedReads = hasPendingFileTodo && repeatCount >= (isPagedRead ? 5 : 3);
+            if (stuckOnFailedFile || stuckOnUnchangedRead || stuckOnRepeatedReads) {
+              const reason = stuckOnFailedFile
+                ? `Read loop detected for ${shortPath(readPath)} after a failed write.`
+                : stuckOnUnchangedRead
+                  ? `Repeated unchanged reads for ${shortPath(readPath)} with pending file work.`
+                  : `Read loop detected: ${shortPath(readPath)} was read ${repeatCount} times without transitioning to a write/edit action.`;
+              addActivity({
+                kind: 'read',
+                status: 'error',
+                title: 'Read loop blocked',
+                subtitle: shortPath(readPath),
+                detail: {
+                  tool: 'read_file',
+                  path: readPath,
+                  status: 'blocked',
+                  error: reason,
+                  dedup: unchangedRead,
+                },
+              });
+              history.push({
+                role: 'user',
+                content: `${reason}
+Do not read this file again right now. Emit one complete <write_file path="${readPath}"> block with the corrected full file contents.
+No narration. No run_shell. No create_dir.`,
+              });
+              await persistAgentState();
+              shouldStopAgent = nextCount >= 4;
+              break;
+            }
+          }
           if (toolName === 'read_file' && args.path) updateReadStateFromToolResult(agentState, args.path, toolResult);
           if (toolName === 'read_many_files') updateReadStateFromToolResult(agentState, '', toolResult);
           if (['write_file', 'append_file', 'edit_file', 'replace_file_range', 'delete_file'].includes(toolName) && args.path) {
             updateReadStateFromToolResult(agentState, args.path, toolResult);
             recordFileHistory(agentState, args.path, toolName, toolResult, toolName === 'edit_file' ? args.new_string : args.content);
+            const key = `read:${String(args.path).toLowerCase()}`;
+            const repeatKey = `repeat:${String(args.path).toLowerCase()}`;
+            readLoopFingerprints.delete(key);
+            readRepeatFingerprints.delete(repeatKey);
+            agentState.actionFingerprints = agentState.actionFingerprints || {};
+            agentState.actionFingerprints.readLoops = Object.fromEntries(readLoopFingerprints.entries());
+            agentState.actionFingerprints.readRepeats = Object.fromEntries(readRepeatFingerprints.entries());
           }
           if (['edit_file', 'replace_file_range'].includes(toolName) && args.path) {
             const verification = await verifySpecificTodoFile(args.path, workspace);
@@ -1281,7 +1415,7 @@ async function executeTextWriteBlock(block, workspace, agentState = null) {
       tool: 'append_file',
       args: {
         path: block.path,
-        content: chunks[i].startsWith('\n') ? chunks[i] : '\n' + chunks[i],
+        content: chunks[i],
         ...(readSnapshot ? { readSnapshot } : {}),
       },
       workspace,
@@ -1301,23 +1435,26 @@ async function executeTextWriteBlock(block, workspace, agentState = null) {
 }
 
 function chunkFileContent(content) {
-  const lines = content.split('\n');
+  if (!content) return [''];
   const chunks = [];
-  let current = [];
-  let currentChars = 0;
+  let start = 0;
 
-  for (const line of lines) {
-    const lineChars = line.length + 1;
-    if (current.length > 0 && (current.length >= WRITE_CHUNK_LINES || currentChars + lineChars > WRITE_CHUNK_CHARS)) {
-      chunks.push(current.join('\n'));
-      current = [];
-      currentChars = 0;
+  while (start < content.length) {
+    let end = Math.min(start + WRITE_CHUNK_CHARS, content.length);
+
+    // Prefer splitting at a newline when possible, but still enforce a hard
+    // char cap for single-line/minified assets.
+    if (end < content.length) {
+      const newline = content.lastIndexOf('\n', end);
+      if (newline > start + Math.floor(WRITE_CHUNK_CHARS * 0.4)) {
+        end = newline + 1;
+      }
     }
-    current.push(line);
-    currentChars += lineChars;
+
+    chunks.push(content.slice(start, end));
+    start = end;
   }
 
-  if (current.length > 0) chunks.push(current.join('\n'));
   return chunks.length ? chunks : [''];
 }
 
@@ -1409,6 +1546,12 @@ function findIncompleteTextWriteBlock(text) {
   }
   if (!lastFile) return null;
   return text.slice(lastFile.index + lastFile.openTag.length).includes('<<<END_FILE') ? null : lastFile;
+}
+
+function extractIncompleteWriteContent(text, incompleteWrite) {
+  if (!text || !incompleteWrite || typeof incompleteWrite.index !== 'number' || !incompleteWrite.openTag) return '';
+  const start = incompleteWrite.index + incompleteWrite.openTag.length;
+  return text.slice(start);
 }
 
 function stripLargeIncompleteWrite(text) {
