@@ -5,40 +5,46 @@ const http  = require('http');
 const fs    = require('fs');
 const path  = require('path');
 const os    = require('os');
-const { execSync } = require('child_process');
+const { exec } = require('child_process');
 const { BIN_DIR, MODELS_DIR } = require('./configStore');
 
 let activeDownloads = [];
 
+// Async nvidia-smi check (non-blocking)
+function hasNvidia() {
+  return new Promise((resolve) => {
+    exec('nvidia-smi', { encoding: 'utf8', timeout: 5000 }, (err) => resolve(!err));
+  });
+}
+
 // ── Platform detection ────────────────────────────────────────────────────────
-function getPlatformAsset() {
+// Asset naming: llama-{tag}-bin-{platform}.{ext}
+//   Win NVIDIA:  win-cuda-12.4-x64.zip
+//   Win CPU:     win-cpu-x64.zip
+//   Mac ARM:     macos-arm64.tar.gz  (NOT kleidiai variant)
+//   Mac x64:     macos-x64.tar.gz
+//   Linux:       ubuntu-x64.tar.gz
+async function getPlatformAsset() {
   const platform = process.platform;
   const arch = os.arch();
 
   if (platform === 'win32') {
-    // Check for NVIDIA GPU
-    try {
-      execSync('nvidia-smi', { encoding: 'utf8', timeout: 5000 });
-      return { pattern: 'cuda-cu12', ext: '.zip', platform: 'win-cuda' };
-    } catch {
-      return { pattern: 'win-x64', ext: '.zip', platform: 'win-cpu' };
+    const nvidia = await hasNvidia();
+    if (nvidia) {
+      return { pattern: 'win-cuda-12', exclude: 'cudart', ext: '.zip', platform: 'win-cuda' };
     }
+    return { pattern: 'win-cpu-x64', ext: '.zip', platform: 'win-cpu' };
   }
 
   if (platform === 'darwin') {
     if (arch === 'arm64') {
-      return { pattern: 'macos-arm64', ext: '.tar.gz', platform: 'mac-arm' };
+      return { pattern: 'macos-arm64', exclude: 'kleidiai', ext: '.tar.gz', platform: 'mac-arm' };
     }
     return { pattern: 'macos-x64', ext: '.tar.gz', platform: 'mac-x64' };
   }
 
-  // Linux
-  try {
-    execSync('nvidia-smi', { encoding: 'utf8', timeout: 5000 });
-    return { pattern: 'ubuntu-x64-cuda', ext: '.tar.gz', platform: 'linux-cuda' };
-  } catch {
-    return { pattern: 'ubuntu-x64', ext: '.tar.gz', platform: 'linux-cpu' };
-  }
+  // Linux — no separate CUDA build; base ubuntu-x64 works with system CUDA
+  return { pattern: 'ubuntu-x64', exclude: 'vulkan|openvino|sycl|rocm', ext: '.tar.gz', platform: 'linux' };
 }
 
 // ── HTTP download with progress + resume ─────────────────────────────────────
@@ -121,16 +127,19 @@ function downloadFile(url, destPath, onProgress) {
 
 // ── Download llama-server binary ─────────────────────────────────────────────
 async function downloadLlamaServer(opts = {}, onProgress) {
-  const asset = getPlatformAsset();
+  const asset = await getPlatformAsset();
 
   // Get latest release from llama.cpp GitHub
   const releaseUrl = 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest';
   const releaseData = await fetchJSON(releaseUrl);
 
-  // Find matching asset
-  const match = releaseData.assets?.find(a =>
-    a.name.toLowerCase().includes(asset.pattern.toLowerCase())
-  );
+  // Find matching asset (include pattern, exclude unwanted variants)
+  const match = releaseData.assets?.find(a => {
+    const name = a.name.toLowerCase();
+    if (!name.includes(asset.pattern.toLowerCase())) return false;
+    if (asset.exclude && new RegExp(asset.exclude, 'i').test(name)) return false;
+    return true;
+  });
 
   if (!match) {
     throw new Error(`No llama-server binary found for platform: ${asset.platform}. Assets available: ${
@@ -205,20 +214,22 @@ async function fetchJSON(url) {
 }
 
 function extractArchive(archivePath, destDir) {
-  const { execSync } = require('child_process');
-  const ext = path.extname(archivePath).toLowerCase();
-
-  if (process.platform === 'win32' && archivePath.endsWith('.zip')) {
-    // Use PowerShell to extract on Windows
-    execSync(
-      `powershell -command "Expand-Archive -Force -Path '${archivePath}' -DestinationPath '${destDir}'"`,
-      { timeout: 120000 }
-    );
-  } else if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
-    execSync(`tar xzf "${archivePath}" -C "${destDir}"`, { timeout: 120000 });
-  } else if (archivePath.endsWith('.zip')) {
-    execSync(`unzip -o "${archivePath}" -d "${destDir}"`, { timeout: 120000 });
-  }
+  return new Promise((resolve, reject) => {
+    let cmd;
+    if (process.platform === 'win32' && archivePath.endsWith('.zip')) {
+      cmd = `powershell -command "Expand-Archive -Force -Path '${archivePath}' -DestinationPath '${destDir}'"`;
+    } else if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
+      cmd = `tar xzf "${archivePath}" -C "${destDir}"`;
+    } else if (archivePath.endsWith('.zip')) {
+      cmd = `unzip -o "${archivePath}" -d "${destDir}"`;
+    } else {
+      return resolve(destDir);
+    }
+    exec(cmd, { timeout: 120000 }, (err) => {
+      if (err) reject(new Error(`Extract failed: ${err.message}`));
+      else resolve(destDir);
+    });
+  });
 
   return destDir;
 }
