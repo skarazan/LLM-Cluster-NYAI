@@ -114,8 +114,8 @@ class LlamaServerManager extends EventEmitter {
   }
 
   _parseLine(line) {
-    // Detect ready signal
-    if (line.includes('server listening') || line.includes('HTTP server listening')) {
+    // Detect ready signal — llama.cpp outputs "server is listening on http://..."
+    if (line.includes('server is listening') || line.includes('server listening') || line.includes('HTTP server listening')) {
       this.status = 'running';
       this.emit('ready');
     }

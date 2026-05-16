@@ -1,6 +1,6 @@
 {
   "name": "llm-cluster-worker-app",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "One-click GPU worker setup for LLM Cluster",
   "main": "main.js",
   "scripts": {
