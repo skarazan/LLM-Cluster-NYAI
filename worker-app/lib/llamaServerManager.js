@@ -37,7 +37,7 @@ class LlamaServerManager extends EventEmitter {
       '-c', String(opts.contextSize ?? 8192),
       '--host', opts.host || '0.0.0.0',
       '--port', String(opts.port || 8080),
-      '-fa', // flash attention
+      '-fa', 'on', // flash attention
     ];
 
     // TurboQuant — experimental KV cache quantization
