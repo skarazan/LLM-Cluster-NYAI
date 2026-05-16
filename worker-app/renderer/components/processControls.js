@@ -1,6 +1,6 @@
 'use strict';
 
-const { ipcRenderer } = require('electron');
+const ipcCtrl = require('electron').ipcRenderer;
 
 window.ProcessControls = {
   llamaRunning: false,
@@ -52,7 +52,7 @@ window.ProcessControls = {
     const managerUrl = config?.preferredManager || 'https://llm.tutorrev.live';
 
     // Start llama-server
-    await ipcRenderer.invoke('llama:start', {
+    await ipcCtrl.invoke('llama:start', {
       binaryPath: wa.llamaServerPath,
       modelPath: wa.modelPath,
       contextSize: wa.contextSize || 8192,
@@ -62,8 +62,8 @@ window.ProcessControls = {
     });
 
     // Wait for llama-server ready, then start worker
-    ipcRenderer.once('llama:ready', async () => {
-      await ipcRenderer.invoke('worker:start', {
+    ipcCtrl.once('llama:ready', async () => {
+      await ipcCtrl.invoke('worker:start', {
         managerUrl,
         engineType: 'llamacpp',
         engineUrl: 'http://localhost:8080',
@@ -73,7 +73,7 @@ window.ProcessControls = {
   },
 
   async stopAll() {
-    await ipcRenderer.invoke('worker:stop');
-    await ipcRenderer.invoke('llama:stop');
+    await ipcCtrl.invoke('worker:stop');
+    await ipcCtrl.invoke('llama:stop');
   }
 };

@@ -1,6 +1,6 @@
 'use strict';
 
-const { ipcRenderer } = require('electron');
+const ipcWiz = require('electron').ipcRenderer;
 
 window.SetupWizard = {
   step: 1,
@@ -82,7 +82,7 @@ window.SetupWizard = {
       detectBtn.disabled = true;
       detectBtn.textContent = 'Detecting...';
       GpuCard.render(resultEl, null); // show loading
-      this.gpuInfo = await ipcRenderer.invoke('gpu:detect');
+      this.gpuInfo = await ipcWiz.invoke('gpu:detect');
       GpuCard.render(resultEl, this.gpuInfo);
       detectBtn.textContent = 'Re-detect';
       detectBtn.disabled = false;
@@ -105,7 +105,7 @@ window.SetupWizard = {
     // Use cached models from boot() if available
     if (!this.models.length) {
       const gpu = this.gpuInfo?.gpus?.[0] || { vram: 0, bandwidth: null };
-      this.models = await ipcRenderer.invoke('models:recommend', gpu);
+      this.models = await ipcWiz.invoke('models:recommend', gpu);
     }
 
     const turboQuant = window.AppState?.config?.workerApp?.turboQuant || false;
@@ -183,8 +183,8 @@ window.SetupWizard = {
       this.downloads.model = progress;
       updateBars();
     };
-    ipcRenderer.on('download:llama-progress', llamaHandler);
-    ipcRenderer.on('download:model-progress', modelHandler);
+    ipcWiz.on('download:llama-progress', llamaHandler);
+    ipcWiz.on('download:model-progress', modelHandler);
 
     // Start downloads in parallel
     let llamaDone = false, modelDone = false;
@@ -199,7 +199,7 @@ window.SetupWizard = {
       }
     };
 
-    ipcRenderer.invoke('download:llama-server', {}).then(result => {
+    ipcWiz.invoke('download:llama-server', {}).then(result => {
       this.llamaServerPath = result.path;
       llamaDone = true;
       checkDone();
@@ -208,7 +208,7 @@ window.SetupWizard = {
       updateBars();
     });
 
-    ipcRenderer.invoke('download:model', this.selectedModel).then(result => {
+    ipcWiz.invoke('download:model', this.selectedModel).then(result => {
       this.modelPath = result.path;
       modelDone = true;
       checkDone();
@@ -218,16 +218,16 @@ window.SetupWizard = {
     });
 
     cancelBtn.addEventListener('click', async () => {
-      await ipcRenderer.invoke('download:cancel');
-      ipcRenderer.removeListener('download:llama-progress', llamaHandler);
-      ipcRenderer.removeListener('download:model-progress', modelHandler);
+      await ipcWiz.invoke('download:cancel');
+      ipcWiz.removeListener('download:llama-progress', llamaHandler);
+      ipcWiz.removeListener('download:model-progress', modelHandler);
       this.step = 2;
       this.render();
     });
 
     nextBtn.addEventListener('click', () => {
-      ipcRenderer.removeListener('download:llama-progress', llamaHandler);
-      ipcRenderer.removeListener('download:model-progress', modelHandler);
+      ipcWiz.removeListener('download:llama-progress', llamaHandler);
+      ipcWiz.removeListener('download:model-progress', modelHandler);
       this.step = 4;
       this.render();
     });
@@ -263,7 +263,7 @@ window.SetupWizard = {
     testBtn.addEventListener('click', async () => {
       const url = urlInput.value.trim();
       resultEl.innerHTML = '<span style="color: var(--yellow);">Testing...</span>';
-      const result = await ipcRenderer.invoke('manager:test', url);
+      const result = await ipcWiz.invoke('manager:test', url);
       if (result.ok) {
         resultEl.innerHTML = '<span style="color: var(--green);">✓ Connected successfully!</span>';
         this.managerUrl = url;
@@ -275,7 +275,7 @@ window.SetupWizard = {
     discoverBtn.addEventListener('click', async () => {
       discoverBtn.disabled = true;
       discoverBtn.textContent = 'Searching...';
-      const found = await ipcRenderer.invoke('mdns:discover');
+      const found = await ipcWiz.invoke('mdns:discover');
       discoverBtn.textContent = '🔍 Discover';
       discoverBtn.disabled = false;
 
@@ -350,7 +350,7 @@ window.SetupWizard = {
       const workerName = el.querySelector('#worker-name').value.trim() || require('os').hostname();
 
       // Save config
-      await ipcRenderer.invoke('config:save', {
+      await ipcWiz.invoke('config:save', {
         name: workerName,
         engineType: 'llamacpp',
         engineUrl: 'http://localhost:8080',
@@ -367,7 +367,7 @@ window.SetupWizard = {
       });
 
       // Switch to dashboard and start
-      window.AppState.config = await ipcRenderer.invoke('config:load');
+      window.AppState.config = await ipcWiz.invoke('config:load');
       window.switchScreen('dashboard');
       setTimeout(() => ProcessControls.startAll(window.AppState.config), 500);
     });
