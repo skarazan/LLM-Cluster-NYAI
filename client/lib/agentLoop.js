@@ -5,7 +5,7 @@ const { buildApprovalCard } = require('../renderer/components/approvalCard');
 const { getTool }       = require('./tools');
 
 const MAX_TOOL_CALLS = Infinity;
-const WRITE_CHUNK_CHARS = 2500;
+const WRITE_CHUNK_CHARS = 8000;
 const RUN_STATE_IDLE = 'idle';
 const RUN_STATE_PLANNING = 'planning';
 const RUN_STATE_EXECUTING = 'executing';
@@ -502,6 +502,17 @@ FILE WRITING — use XML tags in your text response:
 - Write real, complete code — no placeholders, no TODOs, no "content here".
 - Do NOT use write_file/append_file as tool calls. Do NOT use run_shell to write files.
 
+CRITICAL — FILES OPEN VIA file:// PROTOCOL (no server, no bundler):
+- NEVER use import/export, require(), or <script type="module"> in ANY file. They FAIL on file://.
+- Babel standalone CANNOT load external files on file:// (CORS blocks XMLHttpRequest). So <script type="text/babel" src="file.js"> will FAIL.
+- For JSX: write ALL JSX code INLINE inside <script type="text/babel"> tags in the HTML file itself.
+- For external .js files: use plain <script src="..."></script> with React.createElement() instead of JSX.
+- Best approach for multi-file React: put data/utils in plain <script src="..."> files using window globals, put all React components inline in HTML inside one <script type="text/babel"> block.
+- CDN frameworks (React, Vue, Three.js, etc.) are GLOBAL after their <script> loads. Do NOT import them.
+- Multi-file projects: each file reads globals from previous scripts and assigns its own globals for later scripts.
+- Load dependency scripts BEFORE the scripts that use them. The last script must initialize/mount the app.
+- Cross-check all interfaces between files — function signatures, prop names, event names must match EXACTLY.
+
 TOOL CALLS (for everything else): ${toolCallNames}
 - Use edit_file for small changes to existing files.
 - Use read_file to inspect files. Use run_shell for npm, tests, builds, open.
@@ -519,6 +530,8 @@ ${formatTodoListForPrompt(taskTodos)}
     history = [systemMsg, ...history];
   }
   refreshTodoView();
+
+  const todosAlreadyDoneAtStart = taskTodos.length > 0 && getPendingTodos(taskTodos).length === 0;
 
   let toolCallCount = 0;
   let overflowRetries = 0;
@@ -1075,7 +1088,7 @@ Always close the tag in the same response. No JSON tools. No placeholders.`,
         plainContinuationCount++;
         appendBubble('assistant', resp, meta);
         history.push({ role: 'assistant', content: resp });
-        if (repeatedPlain >= 3 || plainContinuationCount >= 3) {
+        if (repeatedPlain >= 4 || plainContinuationCount >= 5) {
           const first = getPendingTodos(taskTodos)[0];
           const msg = `Agent stuck: repeated progress-only responses without a tool call or file block.${first ? ` Next pending item: ${first.title}${first.path ? ` (${first.path})` : ''}.` : ''}`;
           await updateRunState(RUN_STATE_STUCK, 'repeated_progress_only_responses');
@@ -1618,12 +1631,15 @@ Emit one complete <write_file path="${firstPending?.path || workspace + '/index.
             const stuckOnFailedFile = hasPendingFileTodo && relatedTodo?.status === 'failed' && nextCount >= 2;
             const stuckOnUnchangedRead = hasPendingFileTodo && nextCount >= 3;
             const stuckOnRepeatedReads = hasPendingFileTodo && repeatCount >= (isPagedRead ? 5 : 3);
-            if (stuckOnFailedFile || stuckOnUnchangedRead || stuckOnRepeatedReads) {
+            const stuckOnPostCompletionReads = !hasPendingFileTodo && repeatCount >= (isPagedRead ? 6 : 4);
+            if (stuckOnFailedFile || stuckOnUnchangedRead || stuckOnRepeatedReads || stuckOnPostCompletionReads) {
               const reason = stuckOnFailedFile
                 ? `Read loop detected for ${shortPath(readPath)} after a failed write.`
                 : stuckOnUnchangedRead
                   ? `Repeated unchanged reads for ${shortPath(readPath)} with pending file work.`
-                  : `Read loop detected: ${shortPath(readPath)} was read ${repeatCount} times without transitioning to a write/edit action.`;
+                  : stuckOnPostCompletionReads
+                    ? `${shortPath(readPath)} was read ${repeatCount} times. Stop re-reading and either edit it or move on.`
+                    : `Read loop detected: ${shortPath(readPath)} was read ${repeatCount} times without transitioning to a write/edit action.`;
               addActivity({
                 kind: 'read',
                 status: 'error',
@@ -1811,7 +1827,7 @@ ${JSON.stringify(redactSuspiciousToolOutput(toolResult))}
     }
 
     const pendingAfterCycle = getPendingTodos(taskTodos);
-    if (!abortRef.aborted && !shouldStopAgent && pendingAfterCycle.length === 0 && (cycleMadeProgress || cycleHadTextWrite)) {
+    if (!abortRef.aborted && !shouldStopAgent && pendingAfterCycle.length === 0 && (cycleMadeProgress || cycleHadTextWrite) && !todosAlreadyDoneAtStart) {
       const verification = await verifyTodoFiles(taskTodos, workspace);
       if (!verification.ok) {
         for (const item of verification.failed) markTodoFailed(taskTodos, item.path, item.error);
@@ -1869,6 +1885,8 @@ Respond with one complete <write_file path="${firstPending?.path || workspace + 
         }
       } else if (cycleMadeProgress) {
         consecutiveNoProgressCycles = 0;
+        plainContinuationCount = 0;
+        emptyContinuationCount = 0;
       }
     } else {
       consecutiveNoProgressCycles = 0;

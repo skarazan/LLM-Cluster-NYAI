@@ -12,7 +12,7 @@ let mainWindow;
 const RELEASES_URL = 'https://github.com/skarazan/LLM-Cluster-NYAI/releases/latest';
 const RELEASES_API = 'https://api.github.com/repos/skarazan/LLM-Cluster-NYAI/releases/latest';
 const MAX_NATIVE_WRITE_CHARS = 7000;
-const DEFAULT_READ_LINES = 300;
+const DEFAULT_READ_LINES = 5000;
 const MAX_READ_LINES = 5000;
 const MAX_LIST_ENTRIES = 500;
 const MAX_SEARCH_RESULTS = 200;
