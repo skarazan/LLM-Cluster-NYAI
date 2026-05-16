@@ -360,6 +360,7 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
     let promptTokens = 0, completionTokens = 0;
     let sseEventCount = 0;
     let sseErrors = [];
+    let firstTokenMs = null, lastTokenMs = null;
 
     process.stdout.write('\n[stream] ');
     const reader = res.body;
@@ -404,6 +405,8 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
         if (!delta) continue;
 
         if (delta.content) {
+          if (firstTokenMs === null) firstTokenMs = Date.now();
+          lastTokenMs = Date.now();
           accumulated += delta.content;
           process.stdout.write(delta.content);
           if (onChunk) onChunk(delta.content);
@@ -457,13 +460,17 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       console.log(`[stream] tool_calls: ${toolCalls.map(tc => `${tc.function.name}(${tc.function.arguments.slice(0, 80)})`).join(', ')}`);
     }
 
-    const elapsedSec = (Date.now() - startMs) / 1000;
+    // tok/s = generation speed only — measure first token → last token,
+    // excluding prompt-processing time (which dominates on large prompts).
+    const genSec = (firstTokenMs !== null && lastTokenMs !== null && lastTokenMs > firstTokenMs)
+      ? (lastTokenMs - firstTokenMs) / 1000
+      : (Date.now() - startMs) / 1000;
     tokens = {
       prompt:       promptTokens,
       response:     completionTokens,
       total:        promptTokens + completionTokens,
-      tokensPerSec: (completionTokens && elapsedSec > 0)
-        ? Math.round((completionTokens / elapsedSec) * 10) / 10
+      tokensPerSec: (completionTokens && genSec > 0)
+        ? Math.round((completionTokens / genSec) * 10) / 10
         : null,
       };
     if (

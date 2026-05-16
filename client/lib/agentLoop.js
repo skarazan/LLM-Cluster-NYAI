@@ -452,20 +452,57 @@ async function runAgentTurn(opts) {
     if (ctx.ok) projectContext = ctx;
   } catch {}
   const existingTodoItems = agentState.todos?.length ? agentState.todos : todoState?.items;
+  const existingTodosAllDone = Array.isArray(existingTodoItems)
+    && existingTodoItems.length > 0
+    && existingTodoItems.every(todo => todo.status === 'done');
+  // Follow-up like "notes don't show up" after a finished project: not a fresh
+  // task, not a plan update, but real edit work. Without re-opening todos the
+  // loop sees zero pending items and exits before the model writes anything.
+  const isFollowUpEditRequest = !shouldRunPlanPhase
+    && !isFreshTaskPrompt
+    && !hasPlanUpdateIntent
+    && existingTodosAllDone
+    && isEditRequestPrompt(latestUserPrompt);
+  // Follow-up "run it" on a finished project: needs a run_shell tool call.
+  // No file todos — they would force a needless full rewrite.
+  const isFollowUpRunRequest = !shouldRunPlanPhase
+    && !isFreshTaskPrompt
+    && !hasPlanUpdateIntent
+    && existingTodosAllDone
+    && !isFollowUpEditRequest
+    && isRunRequestPrompt(latestUserPrompt);
   const shouldRebuildTodos = Boolean(
     shouldRunPlanPhase
     || isFreshTaskPrompt
+    || isFollowUpEditRequest
     || !Array.isArray(existingTodoItems)
     || existingTodoItems.length === 0
     || isTodoStatePoisoned(existingTodoItems, workspace),
   );
   const todoPlanSource = approvedPlan || executionPlan || '';
-  const freshTodos = shouldRebuildTodos
+  let freshTodos = shouldRebuildTodos
     ? createTaskTodoList(messages, todoPlanSource, workspace, {
       frontendOnlyHint: isFrontendOnlyTask(executionPlan || approvedPlan || latestUserPrompt),
     })
     : existingTodoItems;
-  const allowTodoStatusCarryOver = hasContinuationIntent || !shouldRebuildTodos;
+  // Follow-up edit that names no new files — re-open the existing project
+  // files so the model has concrete targets to apply the change to.
+  if (isFollowUpEditRequest && (!Array.isArray(freshTodos) || freshTodos.length === 0)) {
+    freshTodos = existingTodoItems
+      .filter(todo => todo.path)
+      .map((todo, index) => ({
+        id: index + 1,
+        title: `Apply requested change to ${shortPath(todo.path)}`,
+        path: todo.path,
+        status: 'pending',
+        error: '',
+        evidence: null,
+      }));
+  }
+  // A follow-up edit request must reset todos to pending — carrying over the
+  // old "done" status would leave the loop with nothing to do.
+  const allowTodoStatusCarryOver = !isFollowUpEditRequest
+    && (hasContinuationIntent || !shouldRebuildTodos);
   const seededTodos = allowTodoStatusCarryOver
     ? mergeTodoState({ items: existingTodoItems }, freshTodos)
     : freshTodos.map((todo, index) => ({ ...todo, id: index + 1, status: 'pending', error: '', evidence: null }));
@@ -540,6 +577,7 @@ ${formatTodoListForPrompt(taskTodos)}
   let incompleteWriteRetries = 0;
   const partialRecoveryTracker = new Map();
   let emptyContinuationCount = 0;
+  let runNudgeCount = 0;
   let consecutiveNoProgressCycles = 0;
   let lastToolCommentaryFingerprint = '';
   const plainResponseFingerprints = new Map();
@@ -1143,6 +1181,19 @@ Always close the tag in the same response. No JSON tools. No placeholders.`,
           await persistAgentState();
           break;
         }
+        continue;
+      }
+
+      // Follow-up "run it" where the model narrated instead of calling
+      // run_shell — push it to actually emit the tool call.
+      if (isFollowUpRunRequest && toolCallCount === 0 && runNudgeCount < 2) {
+        runNudgeCount++;
+        appendBubble('assistant', resp || '', meta);
+        history.push({ role: 'assistant', content: resp || '' });
+        history.push({
+          role: 'user',
+          content: `Don't just describe it — actually run it. Emit one run_shell tool call now with the project's run command. If unsure of the command, read_file the package.json scripts first, then call run_shell.`,
+        });
         continue;
       }
 
@@ -2825,6 +2876,23 @@ function shouldResetTaskStateFromPrompt(prompt, hasContinuationIntent = false) {
   if (/\b(create|build|make|generate|implement|develop)\b/.test(p) && /\b(website|app|demo|project|clone|copycat|tool)\b/.test(p)) return true;
   if (/\bcreate\b/.test(p) && /\.([a-z0-9]{1,6})\b/.test(p)) return true;
   return false;
+}
+
+// A follow-up that asks for a concrete change/fix or reports a bug — as
+// opposed to a pure question. Used to re-open todos when a finished project
+// gets a follow-up so the agent actually writes the fix.
+function isEditRequestPrompt(prompt) {
+  const p = String(prompt || '').toLowerCase().trim();
+  if (!p) return false;
+  return /\b(add|change|fix|update|edit|modify|remove|delete|rename|replace|make|implement|create|adjust|tweak|improve|broken|doesn'?t|does not|don'?t|isn'?t|aren'?t|won'?t|not (work|show|appear|load|render)|missing|wrong|should|need to|error|bug|glitch)\b/.test(p);
+}
+
+// A follow-up that asks to run/build/test/open the project — needs a
+// run_shell tool call, not file todos.
+function isRunRequestPrompt(prompt) {
+  const p = String(prompt || '').toLowerCase().trim();
+  if (!p) return false;
+  return /\b(run|launch|start|execute|open|serve|preview|build|compile|test|npm|yarn|pnpm)\b/.test(p);
 }
 
 function todoMergeKey(todo) {
