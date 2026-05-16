@@ -14,6 +14,11 @@ const chatHistory     = require('./lib/chatHistoryStore');
 let mainWindow;
 
 // ── Auto-update ───────────────────────────────────────────────────────────────
+// Worker-app releases use the tag prefix `worker-v{version}` to avoid
+// colliding with client releases (`v{version}`) in the same repo.
+// electron-updater's GitHub provider doesn't support tag prefixes natively,
+// so we use the generic provider pointing to a static redirector.
+// TODO v1.0.1: set up a simple redirect endpoint or move to separate repo.
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
