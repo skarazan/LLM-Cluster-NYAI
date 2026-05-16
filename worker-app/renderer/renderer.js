@@ -91,18 +91,93 @@ if (ipcRenderer) {
   }).catch(() => {});
 }
 
+// ── Boot steps UI ─────────────────────────────────────────────────────────────
+const bootStepsEl = document.getElementById('boot-steps');
+const bootErrorEl = document.getElementById('boot-error');
+
+function bootStep(label) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:10px;font-size:13px;color:var(--text-dim);';
+  row.innerHTML = `
+    <span class="boot-spinner" style="width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.7s linear infinite;flex-shrink:0;"></span>
+    <span>${label}</span>`;
+  bootStepsEl.appendChild(row);
+
+  return {
+    done(note = '') {
+      row.style.color = 'var(--text)';
+      row.querySelector('.boot-spinner').outerHTML = '<span style="width:14px;text-align:center;color:var(--green);flex-shrink:0;">✓</span>';
+      if (note) row.querySelector('span:last-child').textContent += `  ${note}`;
+      // re-grab after innerHTML swap
+      row.querySelectorAll('span')[0].style.cssText = 'width:14px;text-align:center;color:var(--green);flex-shrink:0;';
+    },
+    fail(msg) {
+      row.style.color = 'var(--red)';
+      row.querySelector('.boot-spinner').outerHTML = '<span style="width:14px;text-align:center;flex-shrink:0;">✗</span>';
+      if (bootErrorEl) bootErrorEl.textContent = msg;
+    },
+  };
+}
+
+// Inject spin keyframe once
+const styleTag = document.createElement('style');
+styleTag.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
+document.head.appendChild(styleTag);
+
 // ── Boot ───────────────────────────────────────────────────────────────────────
 async function boot() {
-  if (!ipcRenderer) return; // showError already called above
+  if (!ipcRenderer) return;
 
+  // Step 1 — config
+  const s1 = bootStep('Loading config...');
   try {
     window.AppState.config = await ipcRenderer.invoke('config:load');
+    s1.done();
   } catch (err) {
-    showError(`Failed to load config via IPC: ${err.message}`);
+    s1.fail(`Config load failed: ${err.message}`);
     return;
   }
 
   const setupComplete = window.AppState.config?.workerApp?.setupComplete;
+
+  if (!setupComplete) {
+    // First launch path — pre-load GPU + models so wizard is instant
+    const s2 = bootStep('Detecting GPU...');
+    try {
+      window.AppState.gpuInfo = await ipcRenderer.invoke('gpu:detect');
+      const gpu = window.AppState.gpuInfo?.gpus?.[0];
+      s2.done(gpu ? `${gpu.name} · ${gpu.vram} GB` : 'No GPU — CPU only');
+    } catch (err) {
+      window.AppState.gpuInfo = { cpuFallback: true };
+      s2.fail(`GPU detect failed: ${err.message}`);
+    }
+
+    const s3 = bootStep('Loading model catalog...');
+    try {
+      const gpu = window.AppState.gpuInfo?.gpus?.[0] || { vram: 0, bandwidth: null };
+      window.AppState.models = await ipcRenderer.invoke('models:recommend', gpu);
+      s3.done(`${window.AppState.models.length} models`);
+    } catch (err) {
+      window.AppState.models = [];
+      s3.fail(`Model catalog failed: ${err.message}`);
+    }
+
+  } else {
+    // Returning user path — just check worker status
+    const s2 = bootStep('Checking worker status...');
+    try {
+      const status = await ipcRenderer.invoke('llama:status');
+      s2.done(status.status === 'running' ? 'Running' : 'Stopped');
+    } catch {
+      s2.done('—');
+    }
+  }
+
+  const sLast = bootStep('Ready!');
+  sLast.done();
+
+  // Brief pause so the user sees "Ready!" tick
+  await new Promise(r => setTimeout(r, 400));
 
   try {
     switchScreen(setupComplete ? 'dashboard' : 'setup');

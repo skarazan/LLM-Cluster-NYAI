@@ -36,9 +36,11 @@
     </div>
 
     <!-- Boot loading state — shown until renderer.js runs -->
-    <div id="screen-loading" class="screen active" style="align-items:center;justify-content:center;flex-direction:column;gap:16px;">
-      <div style="font-size:32px;">⚡</div>
-      <div style="color:var(--text-dim);font-size:14px;">Starting up...</div>
+    <div id="screen-loading" class="screen active" style="align-items:center;justify-content:center;flex-direction:column;gap:8px;">
+      <div style="font-size:36px;margin-bottom:8px;">⚡</div>
+      <div style="font-weight:700;font-size:18px;color:var(--text);margin-bottom:12px;">LLM Cluster Worker</div>
+      <div id="boot-steps" style="display:flex;flex-direction:column;gap:6px;min-width:260px;"></div>
+      <div id="boot-error" style="color:var(--red);font-size:12px;margin-top:8px;max-width:400px;text-align:center;"></div>
     </div>
 
     <!-- Screens injected here by renderer.js -->

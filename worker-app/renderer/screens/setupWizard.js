@@ -14,6 +14,13 @@ window.SetupWizard = {
 
   async init(container) {
     this.container = container;
+    // Use pre-cached data from boot() so step 1 & 2 are instant
+    if (!this.gpuInfo && window.AppState.gpuInfo) {
+      this.gpuInfo = window.AppState.gpuInfo;
+    }
+    if (!this.models.length && window.AppState.models?.length) {
+      this.models = window.AppState.models;
+    }
     this.render();
   },
 
@@ -95,8 +102,11 @@ window.SetupWizard = {
 
   // ── Step 2: Model Selection ────────────────────────────────────────────
   async renderModelStep(el) {
-    const gpu = this.gpuInfo?.gpus?.[0] || { vram: 0, bandwidth: null };
-    this.models = await ipcRenderer.invoke('models:recommend', gpu);
+    // Use cached models from boot() if available
+    if (!this.models.length) {
+      const gpu = this.gpuInfo?.gpus?.[0] || { vram: 0, bandwidth: null };
+      this.models = await ipcRenderer.invoke('models:recommend', gpu);
+    }
 
     const turboQuant = window.AppState?.config?.workerApp?.turboQuant || false;
 
