@@ -10,7 +10,7 @@
   <!-- ── Nav sidebar ──────────────────────────────────────────────────────── -->
   <nav id="sidebar">
     <div class="sidebar-brand">⚡ LLM Worker</div>
-    <button class="nav-btn active" data-screen="dashboard">
+    <button class="nav-btn" data-screen="dashboard">
       <span class="nav-icon">📊</span> Dashboard
     </button>
     <button class="nav-btn" data-screen="setup">
@@ -35,11 +35,25 @@
       <button id="update-dismiss">&times;</button>
     </div>
 
+    <!-- Boot loading state — shown until renderer.js runs -->
+    <div id="screen-loading" class="screen active" style="align-items:center;justify-content:center;flex-direction:column;gap:16px;">
+      <div style="font-size:32px;">⚡</div>
+      <div style="color:var(--text-dim);font-size:14px;">Starting up...</div>
+    </div>
+
     <!-- Screens injected here by renderer.js -->
-    <div id="screen-dashboard" class="screen active"></div>
+    <div id="screen-dashboard" class="screen"></div>
     <div id="screen-setup" class="screen"></div>
     <div id="screen-history" class="screen"></div>
     <div id="screen-settings" class="screen"></div>
+
+    <!-- Error screen shown if boot fails -->
+    <div id="screen-error" class="screen" style="align-items:center;justify-content:center;flex-direction:column;gap:16px;padding:40px;">
+      <div style="font-size:32px;">⚠️</div>
+      <div style="font-size:18px;font-weight:600;">Something went wrong</div>
+      <div id="error-message" style="color:var(--red);font-size:13px;font-family:monospace;max-width:600px;text-align:center;"></div>
+      <button class="btn btn-secondary" onclick="location.reload()">Retry</button>
+    </div>
   </main>
 
   <!-- ── Scripts ──────────────────────────────────────────────────────────── -->
