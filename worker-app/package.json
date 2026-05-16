@@ -1,0 +1,65 @@
+{
+  "name": "llm-cluster-worker-app",
+  "version": "1.0.0",
+  "description": "One-click GPU worker setup for LLM Cluster",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win --x64",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "release": "electron-builder --publish always"
+  },
+  "dependencies": {
+    "bonjour-service": "^1.3.0",
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "electron": "^41.5.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.llmcluster.worker",
+    "productName": "LLM Cluster Worker",
+    "publish": {
+      "provider": "github",
+      "owner": "skarazan",
+      "repo": "LLM-Cluster-NYAI"
+    },
+    "extraResources": [
+      {
+        "from": "../worker",
+        "to": "worker",
+        "filter": ["**/*", "!node_modules/**"]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "category": "public.app-category.utilities",
+      "identity": null
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Utility"
+    },
+    "files": [
+      "main.js",
+      "lib/**/*",
+      "renderer/**/*"
+    ]
+  }
+}

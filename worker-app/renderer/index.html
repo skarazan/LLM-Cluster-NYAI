@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Cluster Worker</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ── Nav sidebar ──────────────────────────────────────────────────────── -->
+  <nav id="sidebar">
+    <div class="sidebar-brand">⚡ LLM Worker</div>
+    <button class="nav-btn active" data-screen="dashboard">
+      <span class="nav-icon">📊</span> Dashboard
+    </button>
+    <button class="nav-btn" data-screen="setup">
+      <span class="nav-icon">🔧</span> Setup
+    </button>
+    <button class="nav-btn" data-screen="history">
+      <span class="nav-icon">💬</span> History
+    </button>
+    <button class="nav-btn" data-screen="settings">
+      <span class="nav-icon">⚙️</span> Settings
+    </button>
+    <div class="sidebar-spacer"></div>
+    <div class="sidebar-version" id="app-version">v1.0.0</div>
+  </nav>
+
+  <!-- ── Main content area ────────────────────────────────────────────────── -->
+  <main id="content">
+    <!-- Update banner -->
+    <div id="update-banner" class="update-banner hidden">
+      <span id="update-text">Update available</span>
+      <button id="update-action">Restart to Update</button>
+      <button id="update-dismiss">&times;</button>
+    </div>
+
+    <!-- Screens injected here by renderer.js -->
+    <div id="screen-dashboard" class="screen active"></div>
+    <div id="screen-setup" class="screen"></div>
+    <div id="screen-history" class="screen"></div>
+    <div id="screen-settings" class="screen"></div>
+  </main>
+
+  <!-- ── Scripts ──────────────────────────────────────────────────────────── -->
+  <script src="components/gpuCard.js"></script>
+  <script src="components/modelBrowser.js"></script>
+  <script src="components/downloadProgress.js"></script>
+  <script src="components/statsCards.js"></script>
+  <script src="components/logViewer.js"></script>
+  <script src="components/processControls.js"></script>
+  <script src="screens/setupWizard.js"></script>
+  <script src="screens/dashboard.js"></script>
+  <script src="screens/chatHistory.js"></script>
+  <script src="screens/settings.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
