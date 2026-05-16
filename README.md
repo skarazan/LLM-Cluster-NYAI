@@ -20,8 +20,8 @@ Run AI models on your own hardware. Chat with them from a desktop app. Or let th
 
 | App | What it does | Link |
 |-----|-------------|------|
-| **LLM Cluster Chat** | Chat client + code agent | [Latest Release →](https://github.com/skarazan/LLM-Cluster-NYAI/releases/latest) |
-| **LLM Cluster Worker** | One-click GPU worker setup | [worker-v1.0.0 →](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/worker-v1.0.0) |
+| **LLM Cluster Chat** | Chat client + code agent | [v1.0.8 →](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/v1.0.8) |
+| **LLM Cluster Worker** | One-click GPU worker setup | [worker-v1.0.8 →](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/worker-v1.0.8) |
 
 **macOS note:** Apps aren't signed (no $99/yr Apple account). After installing, run once in Terminal:
 ```bash
@@ -29,6 +29,31 @@ xattr -cr "/Applications/LLM Cluster Chat.app"
 xattr -cr "/Applications/LLM Cluster Worker.app"
 ```
 Or right-click the app → Open → Open anyway.
+
+---
+
+## Available Models
+
+The Worker App includes these models in its catalog. Pick one during setup — it downloads automatically.
+
+| Model | Params | VRAM | Good for |
+|-------|--------|------|----------|
+| Qwen3 1.7B | 1.7B | 2 GB | Fast assistant, lightweight tasks |
+| Qwen3 4B | 4B | 4 GB | Good balance for 4-6 GB GPUs |
+| Llama 3.2 3B | 3B | 3 GB | General chat |
+| **Qwen3 8B** | 8B | 7 GB | Excellent all-rounder, strong reasoning |
+| Llama 3.1 8B | 8B | 7 GB | Great at instruction following |
+| Mistral 7B | 7B | 6 GB | Fast, efficient chat and code |
+| Gemma 2 9B | 9B | 8 GB | Strong at analysis |
+| DeepSeek R1 8B | 8B | 7 GB | Chain-of-thought reasoning, math |
+| Qwen3 14B | 14B | 11 GB | Top quality for 12 GB GPUs |
+| Qwen3 30B-A3B | 30B (MoE) | 22 GB | 30B params, 3B active — fast like 3B, smart like 30B |
+| Qwen3 32B | 32B | 24 GB | Excellent quality (4090, A5000) |
+| Llama 3.3 70B | 70B | 48 GB | Flagship (A6000, Mac Ultra) |
+| Qwen 2.5 Coder 7B | 7B | 7 GB | Code generation specialist |
+| Qwen 2.5 Coder 32B | 32B | 24 GB | Best open-source code model |
+
+All models are Q4_K_M quantized GGUF files from HuggingFace.
 
 ---
 
@@ -79,7 +104,7 @@ curl http://your-server:3000/workers
 
 ### Option A — Worker App (recommended)
 
-Download **LLM Cluster Worker** from the [releases page](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/worker-v1.0.0). Install it, unlock it (macOS command above), open it.
+Download **LLM Cluster Worker** from the [releases page](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/worker-v1.0.8). Install it, unlock it (macOS command above), open it.
 
 The setup wizard walks you through everything:
 
@@ -268,6 +293,16 @@ npm run release
 xattr -cr "/Applications/LLM Cluster Chat.app"
 xattr -cr "/Applications/LLM Cluster Worker.app"
 ```
+
+**Windows: Can't uninstall old Worker App ("app is still running")**
+The old uninstaller doesn't kill processes. Run these in PowerShell as Admin:
+```powershell
+taskkill /F /IM "LLM Cluster Worker.exe" /T
+taskkill /F /IM llama-server.exe /T
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\llm-cluster-worker"
+Remove-Item -Recurse -Force "$env:APPDATA\llm-cluster-worker-app"
+```
+Then install the latest version fresh. Versions 1.0.5+ handle this automatically.
 
 **Windows: SmartScreen blocks the installer**
 Click "More info" → "Run anyway". This happens because the app isn't code-signed. It's safe.
