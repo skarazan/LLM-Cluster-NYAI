@@ -60,14 +60,40 @@ function createWindow() {
 }
 
 app.whenReady().then(createWindow);
-app.on('window-all-closed', async () => {
-  // Graceful shutdown
-  await llamaServer.stop();
-  await workerProcess.stop();
+
+// Graceful shutdown — runs on normal close AND when NSIS uninstaller kills the process
+let isQuitting = false;
+async function gracefulShutdown() {
+  if (isQuitting) return;
+  isQuitting = true;
+  try {
+    await Promise.race([
+      Promise.all([llamaServer.stop(), workerProcess.stop()]),
+      new Promise(r => setTimeout(r, 4000)), // hard timeout 4s
+    ]);
+  } catch { /* ignore */ }
+}
+
+app.on('before-quit', async (e) => {
+  if (isQuitting) return;
+  e.preventDefault();
+  await gracefulShutdown();
   app.quit();
 });
+
+app.on('window-all-closed', () => {
+  // On Windows, quit when last window closes (unlike macOS convention)
+  if (process.platform !== 'darwin') app.quit();
+});
+
 app.on('activate', () => {
   if (!mainWindow) createWindow();
+});
+
+// Handle SIGTERM from uninstaller / system
+process.on('SIGTERM', async () => {
+  await gracefulShutdown();
+  process.exit(0);
 });
 
 // ── IPC: Config ───────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 {
   "name": "llm-cluster-worker-app",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "One-click GPU worker setup for LLM Cluster",
   "main": "main.js",
   "scripts": {
@@ -40,7 +40,8 @@
     },
     "nsis": {
       "oneClick": true,
-      "allowToChangeInstallationDirectory": false
+      "allowToChangeInstallationDirectory": false,
+      "include": "build/installer.nsh"
     },
     "mac": {
       "target": [
