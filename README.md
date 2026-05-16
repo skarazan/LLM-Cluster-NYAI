@@ -1,126 +1,115 @@
 # LLM Cluster
 
-Local Ollama cluster for running AI models across multiple machines on a LAN.
-
-## Architecture
+Run AI models on your own hardware. Chat with them from a desktop app. Or let the built-in code agent build entire projects for you — no cloud, no API keys, no per-token bills.
 
 ```
-[Client app] --HTTP--> [Backend Manager] --HTTP--> [Worker machines with Ollama]
+[Desktop Client]  ──HTTP──►  [Manager]  ──HTTP──►  [Worker + GPU]
+   Electron app              Express.js            llama.cpp / Ollama / LM Studio / vLLM
 ```
 
-- **backend/** — Node.js + Express manager. Receives chat requests, routes round-robin to registered workers.
-- **worker/** — Standalone Node.js agent. Run on any machine with Ollama to register it as a worker.
-- **client/** — Electron desktop chat app. Distributed as `.dmg` (macOS) and `.exe` (Windows).
+- **backend/** — Manager server. Routes jobs to workers, handles load balancing and failover.
+- **worker/** — Runs on your GPU machine. Talks to the local inference engine and streams results back.
+- **client/** — Electron desktop app with chat UI and an autonomous code agent.
+
+📖 Full docs: [DOCUMENTATION.md](DOCUMENTATION.md)
 
 ---
 
-## 1. Manager (one machine)
+## Quick Start
 
-Install and start the backend:
+### 1. Manager (one machine)
 
 ```bash
 cd backend
 npm install
-npm start
+npm start            # runs on port 3000
 ```
 
-Runs on port `3000`. Open firewall port `3000` for LAN access.
+### 2. Worker (GPU machine)
 
----
-
-## 2. Workers (any machine with Ollama)
-
-### Requirements
-1. [Ollama](https://ollama.com) installed and running
-2. Model pulled: `ollama pull llama3`
-3. Firewall port `11434` open for LAN
-
-### On macOS/Linux — allow LAN access
-Ollama binds to `localhost` by default. To accept connections from the manager:
+Start your inference engine, then register with the manager:
 
 ```bash
-OLLAMA_HOST=0.0.0.0:11434 ollama serve
-```
+# Start llama-server (or ollama serve, or lm studio, etc.)
+./llama-server -m model.gguf -ngl 999 --host 0.0.0.0 --port 8080
 
-### On Windows — allow LAN access
-Set the environment variable before starting Ollama:
-
-```
-OLLAMA_HOST=0.0.0.0:11434
-```
-
-Then add a Windows Firewall inbound rule for TCP port `11434`.
-
-### Register as a worker
-
-```bash
+# In another terminal
 cd worker
-node index.js http://<manager-ip>:3000
+npm install
+LLM_ENGINE_TYPE=llamacpp node index.js http://<manager-ip>:3000
 ```
 
-The worker auto-registers, sends heartbeats every 15s, and deregisters on exit (Ctrl+C).
-If the manager doesn't hear a heartbeat for 30s, it evicts the worker automatically.
+The worker auto-registers, sends heartbeats, and deregisters on Ctrl+C.
 
----
+Supported engines: `ollama` (default), `llamacpp`, `lmstudio`, `vllm`
 
-## 3. Client (user machines)
+### 3. Client (your laptop)
 
-Download the latest installer from [GitHub Releases](https://github.com/skarazan/LLM-Cluster-NYAI/releases/latest).
-
-- macOS: `.dmg`
-- Windows: `.exe`
-
-Enter the manager's LAN IP in the app (e.g. `http://192.168.1.x:3000`), click **Test** to verify connection, then start chatting.
-
-The app maintains full conversation history per session. Click **New Chat** to start fresh.
-
-### Update notifications
-
-On launch, the client checks GitHub Releases. If a newer version exists, a banner appears with a link to download the update.
-
----
-
-## 4. Chat API
-
-```
-POST /chat
-Content-Type: application/json
-
-{
-  "messages": [
-    { "role": "user", "content": "Hello" }
-  ],
-  "model": "llama3"
-}
-```
-
-Response:
-```json
-{ "worker": "worker-name", "model": "llama3", "response": "..." }
-```
-
-Workers endpoint:
-```
-GET /workers          — list registered workers
-POST /workers/register
-POST /workers/heartbeat
-DELETE /workers/deregister
-```
-
----
-
-## 5. Building & releasing
+Download from [GitHub Releases](https://github.com/skarazan/LLM-Cluster-NYAI/releases/latest) or run from source:
 
 ```bash
 cd client
 npm install
-npm run build:mac    # produces .dmg in client/dist/
-npm run build:win    # produces .exe in client/dist/
+npm start
 ```
 
-Tagging a release triggers GitHub Actions to build for macOS + Windows and publish to GitHub Releases automatically:
+Enter the manager URL (ask the team if you don't have it), click Test, start chatting.
+
+---
+
+## Code Agent
+
+The client has a built-in code agent. Select a workspace folder, describe what you want, and the agent will:
+
+1. Create a plan with a file manifest
+2. Write all the files (HTML, CSS, JS, etc.)
+3. Run shell commands as needed (npm install, tests, etc.)
+4. Verify the output and iterate on issues
+
+It handles multi-file projects, framework code (React, Vue, etc.), and can fix bugs when you point them out. It's not perfect — think of it as a very fast intern that sometimes needs guidance.
+
+---
+
+## Worker Configuration
+
+Set via env vars, CLI args, or `~/.llm-cluster-worker.json`:
+
+```json
+{
+  "name": "my-gpu",
+  "engineType": "llamacpp",
+  "engineUrl": "http://localhost:8080",
+  "engineApiKey": "my-key",
+  "preferredManager": "https://llm.tutorrev.live"
+}
+```
+
+---
+
+## Building & Releasing
 
 ```bash
-git tag v1.x.x
-git push origin v1.x.x
+cd client
+npm run build:mac    # .dmg
+npm run build:win    # .exe
+npm run build:linux  # .AppImage
+
+# Publish to GitHub Releases
+export GH_TOKEN=ghp_...
+npm run release
+```
+
+---
+
+## API
+
+```
+POST /chat              — Send messages, get streaming response
+POST /chat/cancel       — Cancel an in-flight request
+GET  /workers           — List registered workers
+POST /workers/register  — Worker self-registers
+POST /workers/heartbeat — Worker keepalive + metrics
+GET  /workers/poll/:id  — Worker long-polls for jobs
+POST /workers/result    — Worker submits job result
+POST /workers/chunk     — Worker forwards streaming chunks
 ```
