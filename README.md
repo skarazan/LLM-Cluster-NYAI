@@ -20,8 +20,8 @@ Run AI models on your own hardware. Chat with them from a desktop app. Or let th
 
 | App | What it does | Link |
 |-----|-------------|------|
-| **LLM Cluster Chat** | Chat client + code agent | [v1.0.8 →](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/v1.0.8) |
-| **LLM Cluster Worker** | One-click GPU worker setup | [worker-v1.0.8 →](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/worker-v1.0.8) |
+| **LLM Cluster Chat** | Chat client + code agent | [v1.0.9 →](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/v1.0.9) |
+| **LLM Cluster Worker** | One-click GPU worker setup | [v1.0.9 →](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/v1.0.9) |
 
 **macOS note:** Apps aren't signed (no $99/yr Apple account). After installing, run once in Terminal:
 ```bash
@@ -104,7 +104,7 @@ curl http://your-server:3000/workers
 
 ### Option A — Worker App (recommended)
 
-Download **LLM Cluster Worker** from the [releases page](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/worker-v1.0.8). Install it, unlock it (macOS command above), open it.
+Download **LLM Cluster Worker** from the [releases page](https://github.com/skarazan/LLM-Cluster-NYAI/releases/tag/v1.0.9). Install it, unlock it (macOS command above), open it.
 
 The setup wizard walks you through everything:
 
