@@ -2,6 +2,7 @@ const express = require('express');
 const os = require('os');
 const chatRoutes = require('./routes/chatRoutes');
 const workerRoutes = require('./routes/workerRoutes');
+const openaiRoutes = require('./routes/openaiRoutes');
 
 const app = express();
 const PORT = 3000;
@@ -14,6 +15,7 @@ app.get('/', (req, res) => {
 
 app.use('/chat', chatRoutes);
 app.use('/workers', workerRoutes);
+app.use('/v1', openaiRoutes);
 
 app.listen(PORT, () => {
   console.log(`Backend running at http://localhost:${PORT}`);
