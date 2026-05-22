@@ -189,8 +189,11 @@ Download **LLM Cluster Chat** from the [latest release](https://github.com/skara
 ```bash
 cd client
 npm install
+
+## VS Code Extension
+
+A development VS Code extension lives in [vscode-extension/](vscode-extension/). It adds inline completions plus basic ask/generate commands backed by the same manager API.
 npm start
-```
 
 Enter the manager URL in the top bar and click **Test**. Green dot = connected, pick a model from the dropdown, start chatting.
 

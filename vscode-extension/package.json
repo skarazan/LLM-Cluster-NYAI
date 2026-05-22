@@ -1,0 +1,151 @@
+{
+  "name": "llm-cluster-vscode",
+  "displayName": "LLM Cluster",
+  "description": "VS Code autocomplete and code generation for the LLM Cluster manager.",
+  "version": "0.0.1",
+  "publisher": "llm-cluster",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/skarazan/LLM-Cluster-NYAI.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "AI"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:llmCluster.chatView",
+    "onCommand:llmCluster.ask",
+    "onCommand:llmCluster.sendTask",
+    "onCommand:llmCluster.sendToLocalLlm",
+    "onCommand:llmCluster.generateFromSelection",
+    "onCommand:llmCluster.focusChat"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "llmClusterContainer",
+          "title": "LLM Cluster",
+          "icon": "./images/llm-cluster.svg"
+        }
+      ]
+    },
+    "views": {
+      "llmClusterContainer": [
+        {
+          "id": "llmCluster.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "llmCluster.ask",
+        "title": "LLM Cluster: Ask"
+      },
+      {
+        "command": "llmCluster.sendTask",
+        "title": "LLM Cluster: Send Task"
+      },
+      {
+        "command": "llmCluster.sendToLocalLlm",
+        "title": "LLM Cluster: Send to Local LLM"
+      },
+      {
+        "command": "llmCluster.generateFromSelection",
+        "title": "LLM Cluster: Generate From Selection"
+      },
+      {
+        "command": "llmCluster.focusChat",
+        "title": "LLM Cluster: Focus Chat"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "llmCluster.sendToLocalLlm",
+          "group": "navigation@3",
+          "when": "editorTextFocus"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "LLM Cluster",
+      "properties": {
+        "llmCluster.managerUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "Base URL of the LLM Cluster manager."
+        },
+        "llmCluster.model": {
+          "type": "string",
+          "default": "Qwen 2.5 Coder 7B",
+          "description": "Model name requested from the manager. It must match a worker model name or prefix."
+        },
+        "llmCluster.enableInlineCompletions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable ghost-text completions in the editor."
+        },
+        "llmCluster.maxContextChars": {
+          "type": "number",
+          "default": 6000,
+          "minimum": 500,
+          "maximum": 20000,
+          "description": "How many prefix characters to send around the cursor for inline completions."
+        },
+        "llmCluster.maxSuffixChars": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "How many characters after the cursor to send for inline completions."
+        },
+        "llmCluster.invocationMode": {
+          "type": "string",
+          "enum": ["manager", "direct", "client"],
+          "default": "manager",
+          "description": "How the extension sends prompts: 'manager' routes via the LLM Cluster manager; 'direct' posts to a local engine URL; 'client' posts to a client-proxy URL."
+        },
+        "llmCluster.engineUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "Full endpoint URL to send prompts in 'direct' mode (can include path)."
+        },
+        "llmCluster.useWorkerEndpointForDirectCalls": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, selecting a worker will auto-fill the Engine URL and switch to 'direct' invocation for immediate direct calls."
+        },
+        "llmCluster.clientProxyUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "If using 'client' mode or the Send to Local LLM command, the local desktop/web app's HTTP proxy URL."
+        },
+        "llmCluster.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "maximum": 600000,
+          "description": "Timeout for requests sent to the manager."
+        }
+        ,
+        "llmCluster.openOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the LLM Cluster Chat view automatically on VS Code startup."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "node --check extension.js",
+    "package": "npx @vscode/vsce package",
+    "prepackage": "npm run check"
+  }
+}
