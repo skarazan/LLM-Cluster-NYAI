@@ -16,18 +16,7 @@
     "AI"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onView:llmCluster.chatView",
-    "onCommand:llmCluster.ask",
-    "onCommand:llmCluster.showPanel",
-    "onCommand:llmCluster.saveChatHistory",
-    "onCommand:llmCluster.loadChatHistory",
-    "onCommand:llmCluster.exportChatHistory",
-    "onCommand:llmCluster.importChatHistory",
-    "onCommand:llmCluster.sendTask",
-    "onCommand:llmCluster.sendToLocalLlm",
-    "onCommand:llmCluster.generateFromSelection",
-    "onCommand:llmCluster.focusChat"
+    "onStartupFinished"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -43,6 +32,7 @@
     "views": {
       "llmClusterContainer": [
         {
+          "icon": "./images/llm-cluster.svg",
           "id": "llmCluster.chatView",
           "name": "Chat"
         }
@@ -56,6 +46,10 @@
       {
         "command": "llmCluster.showPanel",
         "title": "LLM Cluster: Open Panel"
+      },
+      {
+        "command": "llmCluster.openPanels",
+        "title": "LLM Cluster: Open Panels"
       },
       {
         "command": "llmCluster.sendTask",
@@ -101,6 +95,7 @@
       "commandPalette": [
         { "command": "llmCluster.ask" },
         { "command": "llmCluster.showPanel" },
+        { "command": "llmCluster.openPanels" },
         { "command": "llmCluster.sendTask" },
         { "command": "llmCluster.sendToLocalLlm" },
         { "command": "llmCluster.generateFromSelection" },

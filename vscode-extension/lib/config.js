@@ -104,6 +104,16 @@ async function setUseWorkerEndpointForDirect(enabled) {
   }
 }
 
+async function updateSetting(key, value) {
+  try {
+    await vscode.workspace.getConfiguration('llmCluster').update(key, value, vscode.ConfigurationTarget.Workspace);
+    return true;
+  } catch (e) {
+    console.error(`Failed to save ${key}:`, e.message);
+    return false;
+  }
+}
+
 module.exports = {
   getConfig,
   getManagerBaseUrl,
@@ -120,4 +130,5 @@ module.exports = {
   setPreferredWorkerId,
   setPreferredWorkerEndpoint,
   setUseWorkerEndpointForDirect,
+  updateSetting,
 };

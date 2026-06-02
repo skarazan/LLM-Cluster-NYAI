@@ -27,6 +27,7 @@ const {
   pingManager,
   showResultInEditor,
 } = require('./lib/transport');
+const { openDashboardPanel } = require('./lib/dashboardPanel');
 const { previewChangeAndConfirm } = require('./lib/review');
 const {
   getConfig,
@@ -398,10 +399,14 @@ function activate(context) {
   promptStudioState = normalizePromptStudioState(context.globalState.get(PROMPT_STUDIO_KEY) || createDefaultPromptStudioState());
   const output = vscode.window.createOutputChannel('LLM Cluster');
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  statusBarItem.command = 'llmCluster.showPanel';
-  statusBarItem.tooltip = 'LLM Cluster: open extension panel and settings';
-  statusBarItem.text = '$(sparkle) LLM Cluster';
-  statusBarItem.show();
+  const showStatusBar = () => {
+    statusBarItem.command = 'llmCluster.showPanel';
+    statusBarItem.tooltip = 'LLM Cluster: open extension panel and settings';
+    statusBarItem.text = '$(sparkle) LLM Cluster';
+    statusBarItem.show();
+  };
+
+  showStatusBar();
   console.log('LLM Cluster extension activated, status bar shown');
 
   const refreshStatus = async () => {
@@ -414,6 +419,12 @@ function activate(context) {
 
   const refreshTimer = setInterval(refreshStatus, 30000);
   refreshStatus();
+
+  const windowStateListener = vscode.window.onDidChangeWindowState((state) => {
+    if (state.focused) {
+      showStatusBar();
+    }
+  });
 
   let chatViewProvider;
   const sendChatPrompt = async (prompt, provider) => {
@@ -758,67 +769,11 @@ function activate(context) {
   });
 
   const showPanelCommand = vscode.commands.registerCommand('llmCluster.showPanel', async () => {
-    const panel = vscode.window.createWebviewPanel('llmClusterPanel', 'LLM Cluster — Panel', vscode.ViewColumn.One, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-    });
+    await openDashboardPanel(context);
+  });
 
-    const settings = {
-      managerUrl: getManagerBaseUrl(),
-      model: getModelName(),
-      invocationMode: getInvocationMode(),
-      engineUrl: getEngineEndpoint(),
-      clientProxyUrl: getClientProxyUrl(),
-      preferredWorkerId: getPreferredWorkerId(),
-      preferredWorkerEndpoint: getPreferredWorkerEndpoint(),
-    };
-
-    const html = `<!doctype html>
-    <html>
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <style>body{font-family:Segoe UI,Arial;padding:12px;color:#222} h2{margin-top:8px} button{margin:6px 6px 6px 0;padding:6px 10px}</style>
-    </head>
-    <body>
-      <h1>LLM Cluster</h1>
-      <p>Quick access to extension settings and commands.</p>
-      <h2>Settings</h2>
-      <pre id="settings" style="background:#f3f3f3;padding:8px;border-radius:4px;">${escapeHtml(JSON.stringify(settings, null, 2))}</pre>
-      <h2>Commands</h2>
-      <div>
-        <button data-cmd="llmCluster.ask">Ask (Quick prompt)</button>
-        <button data-cmd="llmCluster.focusChat">Open Chat</button>
-        <button data-cmd="llmCluster.saveChatHistory">Save Chat History</button>
-        <button data-cmd="llmCluster.loadChatHistory">Load Chat History</button>
-        <button data-cmd="llmCluster.exportChatHistory">Export Chat History</button>
-        <button data-cmd="llmCluster.importChatHistory">Import Chat History</button>
-        <button data-cmd="llmCluster.sendTask">Send Task</button>
-        <button data-cmd="llmCluster.sendToLocalLlm">Send to Local LLM</button>
-        <button data-cmd="llmCluster.generateFromSelection">Generate From Selection</button>
-      </div>
-      <script>
-        const vscode = acquireVsCodeApi();
-        document.querySelectorAll('button[data-cmd]').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const cmd = btn.getAttribute('data-cmd');
-            vscode.postMessage({ command: 'run', cmd });
-          });
-        });
-      </script>
-    </body>
-    </html>`;
-
-    panel.webview.html = html;
-
-    panel.webview.onDidReceiveMessage(async (msg) => {
-      if (!msg || msg.command !== 'run' || !msg.cmd) return;
-      try {
-        await vscode.commands.executeCommand(msg.cmd);
-      } catch (err) {
-        vscode.window.showErrorMessage('Failed to run command: ' + msg.cmd + ' — ' + (err && err.message));
-      }
-    });
+  const openPanelsCommand = vscode.commands.registerCommand('llmCluster.openPanels', async () => {
+    await openDashboardPanel(context);
   });
 
   const saveHistoryCommand = vscode.commands.registerCommand('llmCluster.saveChatHistory', async () => {
@@ -889,6 +844,7 @@ function activate(context) {
   context.subscriptions.push(
     output,
     statusBarItem,
+    windowStateListener,
     chatViewRegistration,
     inlineProvider,
     askCommand,
@@ -901,6 +857,7 @@ function activate(context) {
     importHistoryCommand,
     focusChatCommand,
     showPanelCommand,
+    openPanelsCommand,
     {
       dispose() {
         clearInterval(refreshTimer);
