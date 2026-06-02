@@ -972,7 +972,7 @@ function showDashboard(context) {
         dashboardPanel.webview.postMessage({ type: 'dashboard:state', busy: true });
         try {
           const payloadMessages = buildRequestMessages(message.messages);
-          const response = await requestCompletion(payloadMessages, (chunk) => {
+          const response = await requestCompletion(payloadMessages, null, (chunk) => {
             dashboardPanel.webview.postMessage({ type: 'chat:chunk', chunk });
           });
           dashboardState.chatMessages = message.messages;

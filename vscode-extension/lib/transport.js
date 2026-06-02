@@ -70,7 +70,7 @@ async function requestCompletion(messages, token, onChunk, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (token) {
+  if (token && typeof token.onCancellationRequested === 'function') {
     token.onCancellationRequested(() => controller.abort());
   }
 
