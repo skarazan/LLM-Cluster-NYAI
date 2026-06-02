@@ -464,6 +464,10 @@ function buildWebviewHtml(vars) {
             <button id="clear" class="secondary">Clear</button>
             <button id="task" class="secondary">Agent</button>
             <button id="send" class="primary">Send</button>
+            <button id="saveChat" class="secondary">Save</button>
+            <button id="loadChat" class="secondary">Load</button>
+            <button id="exportChat" class="secondary">Export</button>
+            <button id="importChat" class="secondary">Import</button>
           </div>
           <div class="meta">Chat mode sends a prompt. Agent mode routes through task execution with workspace context and tools.</div>
         </div>
@@ -526,6 +530,22 @@ function buildWebviewHtml(vars) {
               Use worker endpoint for direct calls
             </label>
             <div class="compact-note">Preferred worker id: <code>${preferredWorkerId || 'none'}</code></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">LLM Commands</div>
+              <div class="panel-subtitle">Right-click a command for quick actions.</div>
+            </div>
+          </div>
+          <div class="stack">
+            <div id="cmdList" class="cmd-list"></div>
+            <div id="cmdContextMenu" class="hidden" style="position:fixed;z-index:9999;background:var(--panel);border:1px solid var(--border);padding:8px;border-radius:8px;">
+              <button id="cmdExecute" class="secondary">Execute</button>
+              <button id="cmdCopy" class="secondary">Copy</button>
+            </div>
           </div>
         </section>
 
@@ -633,6 +653,10 @@ function buildWebviewHtml(vars) {
     const send = document.getElementById('send');
     const clear = document.getElementById('clear');
     const task = document.getElementById('task');
+    const saveChatBtn = document.getElementById('saveChat');
+    const loadChatBtn = document.getElementById('loadChat');
+    const exportChatBtn = document.getElementById('exportChat');
+    const importChatBtn = document.getElementById('importChat');
     const modeSelect = document.getElementById('modeSelect');
     const modeChat = document.getElementById('modeChat');
     const modeAgent = document.getElementById('modeAgent');
@@ -660,6 +684,10 @@ function buildWebviewHtml(vars) {
     const saveSkill = document.getElementById('saveSkill');
     const cancelSkillEdit = document.getElementById('cancelSkillEdit');
     const skillList = document.getElementById('skillList');
+    const cmdList = document.getElementById('cmdList');
+    const cmdContextMenu = document.getElementById('cmdContextMenu');
+    const cmdExecute = document.getElementById('cmdExecute');
+    const cmdCopy = document.getElementById('cmdCopy');
 
     let promptStudioState = normalizePromptState(initialPromptStudioState);
     let editingPromptId = '';
@@ -669,6 +697,64 @@ function buildWebviewHtml(vars) {
     function post(type, extra = {}) {
       vscode.postMessage({ type, ...extra });
     }
+
+    const availableCommands = [
+      { id: 'llmCluster.ask', label: 'Ask' },
+      { id: 'llmCluster.sendTask', label: 'Send Task' },
+      { id: 'llmCluster.sendToLocalLlm', label: 'Send to Local LLM' },
+      { id: 'llmCluster.generateFromSelection', label: 'Generate From Selection' },
+      { id: 'llmCluster.saveChatHistory', label: 'Save Chat History' },
+      { id: 'llmCluster.loadChatHistory', label: 'Load Chat History' },
+      { id: 'llmCluster.exportChatHistory', label: 'Export Chat History' },
+      { id: 'llmCluster.importChatHistory', label: 'Import Chat History' },
+      { id: 'llmCluster.focusChat', label: 'Focus Chat' }
+    ];
+
+    function renderCommandList() {
+      if (!cmdList) return;
+      cmdList.innerHTML = availableCommands.map((c) => '<div class="cmd-item" data-cmd="' + escapeHtml(c.id) + '">' + escapeHtml(c.label) + '</div>').join('');
+    }
+
+    let currentCmdId = '';
+    function hideCmdMenu() { if (cmdContextMenu) cmdContextMenu.classList.add('hidden'); }
+    function showCmdMenu(x, y) {
+      if (!cmdContextMenu) return;
+      cmdContextMenu.style.left = x + 'px';
+      cmdContextMenu.style.top = y + 'px';
+      cmdContextMenu.classList.remove('hidden');
+    }
+
+    document.addEventListener('click', (e) => { hideCmdMenu(); });
+    if (cmdList) {
+      cmdList.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        const target = ev.target.closest('.cmd-item');
+        if (!target) return;
+        currentCmdId = target.dataset.cmd || '';
+        showCmdMenu(ev.clientX, ev.clientY);
+      });
+      cmdList.addEventListener('dblclick', (ev) => {
+        const target = ev.target.closest('.cmd-item');
+        if (!target) return;
+        const cid = target.dataset.cmd;
+        post('executeLLMCommand', { command: cid });
+      });
+    }
+
+    if (cmdExecute) {
+      cmdExecute.addEventListener('click', () => {
+        if (currentCmdId) post('executeLLMCommand', { command: currentCmdId });
+        hideCmdMenu();
+      });
+    }
+    if (cmdCopy) {
+      cmdCopy.addEventListener('click', () => {
+        if (currentCmdId) post('copyLLMCommand', { text: currentCmdId });
+        hideCmdMenu();
+      });
+    }
+
+    renderCommandList();
 
     function escapeHtml(text) {
       return String(text)
@@ -978,6 +1064,11 @@ function buildWebviewHtml(vars) {
     modeAgent.addEventListener('click', () => setPanelMode('agent'));
 
     clear.addEventListener('click', () => post('clearChat'));
+
+    if (saveChatBtn) saveChatBtn.addEventListener('click', () => post('saveChat'));
+    if (loadChatBtn) loadChatBtn.addEventListener('click', () => post('loadChat'));
+    if (exportChatBtn) exportChatBtn.addEventListener('click', () => post('exportChat'));
+    if (importChatBtn) importChatBtn.addEventListener('click', () => post('importChat'));
 
     modeSelect.addEventListener('change', () => {
       post('setMode', { mode: modeSelect.value });

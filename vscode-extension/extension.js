@@ -2,6 +2,7 @@
 
 const path = require('path');
 const vscode = require('vscode');
+const fs = require('fs');
 
 const config = require('./lib/config');
 const { getToolSchemas } = require('./lib/tools');
@@ -149,6 +150,78 @@ class ChatViewProvider {
       if (message.type === 'clearChat') {
         this.messages = [];
         this.render();
+      }
+
+      if (message.type === 'saveChat') {
+        try {
+          await this.context.globalState.update('llm-cluster.chatHistory', this.messages || []);
+          vscode.window.showInformationMessage('Chat history saved locally');
+        } catch (err) {
+          vscode.window.showErrorMessage('Failed to save chat history: ' + err.message);
+        }
+      }
+
+      if (message.type === 'loadChat') {
+        try {
+          const history = this.context.globalState.get('llm-cluster.chatHistory', []);
+          this.messages = Array.isArray(history) ? history : [];
+          this.render();
+          vscode.window.showInformationMessage('Chat history restored');
+        } catch (err) {
+          vscode.window.showErrorMessage('Failed to load chat history: ' + err.message);
+        }
+      }
+
+      if (message.type === 'exportChat') {
+        try {
+          const defaultName = `llm-cluster-chat-${Date.now()}.json`;
+          const uri = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.join(getWorkspaceRootPath() || process.cwd(), defaultName)), filters: { 'JSON': ['json'] } });
+          if (uri) {
+            fs.writeFileSync(uri.fsPath, JSON.stringify(this.messages || [], null, 2), 'utf8');
+            vscode.window.showInformationMessage(`Chat exported to ${uri.fsPath}`);
+          }
+        } catch (err) {
+          vscode.window.showErrorMessage('Export failed: ' + err.message);
+        }
+      }
+
+      if (message.type === 'importChat') {
+        try {
+          const uris = await vscode.window.showOpenDialog({ canSelectMany: false, filters: { 'JSON': ['json'] } });
+          if (uris && uris[0]) {
+            const data = fs.readFileSync(uris[0].fsPath, 'utf8');
+            const parsed = JSON.parse(data);
+            this.messages = Array.isArray(parsed) ? parsed : [];
+            await this.context.globalState.update('llm-cluster.chatHistory', this.messages);
+            this.render();
+            vscode.window.showInformationMessage('Chat imported');
+          }
+        } catch (err) {
+          vscode.window.showErrorMessage('Import failed: ' + err.message);
+        }
+      }
+
+      if (message.type === 'executeLLMCommand') {
+        const cmd = String(message.command || '').trim();
+        if (cmd) {
+          try {
+            await vscode.commands.executeCommand(cmd);
+          } catch (err) {
+            vscode.window.showErrorMessage('Failed to execute command: ' + err.message);
+          }
+        }
+      }
+
+      if (message.type === 'copyLLMCommand') {
+        const text = String(message.text || '');
+        if (text) {
+          try {
+            await vscode.env.clipboard.writeText(text);
+            vscode.window.showInformationMessage('Command copied to clipboard');
+          } catch (err) {
+            vscode.window.showErrorMessage('Failed to copy: ' + err.message);
+          }
+        }
       }
 
       if (message.type === 'setMode') {
@@ -325,8 +398,8 @@ function activate(context) {
   promptStudioState = normalizePromptStudioState(context.globalState.get(PROMPT_STUDIO_KEY) || createDefaultPromptStudioState());
   const output = vscode.window.createOutputChannel('LLM Cluster');
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  statusBarItem.command = 'llmCluster.ask';
-  statusBarItem.tooltip = 'LLM Cluster: click to ask the manager for help';
+  statusBarItem.command = 'llmCluster.showPanel';
+  statusBarItem.tooltip = 'LLM Cluster: open extension panel and settings';
   statusBarItem.text = '$(sparkle) LLM Cluster';
   statusBarItem.show();
   console.log('LLM Cluster extension activated, status bar shown');
@@ -684,6 +757,135 @@ function activate(context) {
     await openChatSidebar();
   });
 
+  const showPanelCommand = vscode.commands.registerCommand('llmCluster.showPanel', async () => {
+    const panel = vscode.window.createWebviewPanel('llmClusterPanel', 'LLM Cluster — Panel', vscode.ViewColumn.One, {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+    });
+
+    const settings = {
+      managerUrl: getManagerBaseUrl(),
+      model: getModelName(),
+      invocationMode: getInvocationMode(),
+      engineUrl: getEngineEndpoint(),
+      clientProxyUrl: getClientProxyUrl(),
+      preferredWorkerId: getPreferredWorkerId(),
+      preferredWorkerEndpoint: getPreferredWorkerEndpoint(),
+    };
+
+    const html = `<!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <style>body{font-family:Segoe UI,Arial;padding:12px;color:#222} h2{margin-top:8px} button{margin:6px 6px 6px 0;padding:6px 10px}</style>
+    </head>
+    <body>
+      <h1>LLM Cluster</h1>
+      <p>Quick access to extension settings and commands.</p>
+      <h2>Settings</h2>
+      <pre id="settings" style="background:#f3f3f3;padding:8px;border-radius:4px;">${escapeHtml(JSON.stringify(settings, null, 2))}</pre>
+      <h2>Commands</h2>
+      <div>
+        <button data-cmd="llmCluster.ask">Ask (Quick prompt)</button>
+        <button data-cmd="llmCluster.focusChat">Open Chat</button>
+        <button data-cmd="llmCluster.saveChatHistory">Save Chat History</button>
+        <button data-cmd="llmCluster.loadChatHistory">Load Chat History</button>
+        <button data-cmd="llmCluster.exportChatHistory">Export Chat History</button>
+        <button data-cmd="llmCluster.importChatHistory">Import Chat History</button>
+        <button data-cmd="llmCluster.sendTask">Send Task</button>
+        <button data-cmd="llmCluster.sendToLocalLlm">Send to Local LLM</button>
+        <button data-cmd="llmCluster.generateFromSelection">Generate From Selection</button>
+      </div>
+      <script>
+        const vscode = acquireVsCodeApi();
+        document.querySelectorAll('button[data-cmd]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const cmd = btn.getAttribute('data-cmd');
+            vscode.postMessage({ command: 'run', cmd });
+          });
+        });
+      </script>
+    </body>
+    </html>`;
+
+    panel.webview.html = html;
+
+    panel.webview.onDidReceiveMessage(async (msg) => {
+      if (!msg || msg.command !== 'run' || !msg.cmd) return;
+      try {
+        await vscode.commands.executeCommand(msg.cmd);
+      } catch (err) {
+        vscode.window.showErrorMessage('Failed to run command: ' + msg.cmd + ' — ' + (err && err.message));
+      }
+    });
+  });
+
+  const saveHistoryCommand = vscode.commands.registerCommand('llmCluster.saveChatHistory', async () => {
+    if (!chatViewProvider) {
+      vscode.window.showErrorMessage('Chat view not available');
+      return;
+    }
+    try {
+      await context.globalState.update('llm-cluster.chatHistory', chatViewProvider.messages || []);
+      vscode.window.showInformationMessage('Chat history saved');
+    } catch (err) {
+      vscode.window.showErrorMessage('Failed to save chat history: ' + err.message);
+    }
+  });
+
+  const loadHistoryCommand = vscode.commands.registerCommand('llmCluster.loadChatHistory', async () => {
+    if (!chatViewProvider) {
+      vscode.window.showErrorMessage('Chat view not available');
+      return;
+    }
+    try {
+      const history = context.globalState.get('llm-cluster.chatHistory', []);
+      chatViewProvider.messages = Array.isArray(history) ? history : [];
+      chatViewProvider.render();
+      vscode.window.showInformationMessage('Chat history loaded');
+    } catch (err) {
+      vscode.window.showErrorMessage('Failed to load chat history: ' + err.message);
+    }
+  });
+
+  const exportHistoryCommand = vscode.commands.registerCommand('llmCluster.exportChatHistory', async () => {
+    if (!chatViewProvider) {
+      vscode.window.showErrorMessage('Chat view not available');
+      return;
+    }
+    try {
+      const defaultName = `llm-cluster-chat-${Date.now()}.json`;
+      const uri = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.join(getWorkspaceRootPath() || process.cwd(), defaultName)), filters: { 'JSON': ['json'] } });
+      if (uri) {
+        fs.writeFileSync(uri.fsPath, JSON.stringify(chatViewProvider.messages || [], null, 2), 'utf8');
+        vscode.window.showInformationMessage(`Chat exported to ${uri.fsPath}`);
+      }
+    } catch (err) {
+      vscode.window.showErrorMessage('Export failed: ' + err.message);
+    }
+  });
+
+  const importHistoryCommand = vscode.commands.registerCommand('llmCluster.importChatHistory', async () => {
+    if (!chatViewProvider) {
+      vscode.window.showErrorMessage('Chat view not available');
+      return;
+    }
+    try {
+      const uris = await vscode.window.showOpenDialog({ canSelectMany: false, filters: { 'JSON': ['json'] } });
+      if (uris && uris[0]) {
+        const data = fs.readFileSync(uris[0].fsPath, 'utf8');
+        const parsed = JSON.parse(data);
+        chatViewProvider.messages = Array.isArray(parsed) ? parsed : [];
+        await context.globalState.update('llm-cluster.chatHistory', chatViewProvider.messages);
+        chatViewProvider.render();
+        vscode.window.showInformationMessage('Chat imported');
+      }
+    } catch (err) {
+      vscode.window.showErrorMessage('Import failed: ' + err.message);
+    }
+  });
+
   context.subscriptions.push(
     output,
     statusBarItem,
@@ -693,7 +895,12 @@ function activate(context) {
     sendTaskCommand,
     sendToLocalLlmCommand,
     generateFromSelectionCommand,
+    saveHistoryCommand,
+    loadHistoryCommand,
+    exportHistoryCommand,
+    importHistoryCommand,
     focusChatCommand,
+    showPanelCommand,
     {
       dispose() {
         clearInterval(refreshTimer);
