@@ -156,6 +156,17 @@ LLM_ENGINE_API_KEY=llm-cluster
 LLM_MANAGER_URL=https://llm.tutorrev.live
 ```
 
+If you are using `llamacpp` (a local llama.cpp-based HTTP server) the worker can attempt
+to auto-start the engine when it is not reachable. Configure one of the following in
+`~/.llm-cluster-worker.json` or via environment variables:
+
+- `engineAutoStartCmd` / `LLM_ENGINE_AUTO_START_CMD`: command to run to start the engine (runs in background)
+- `engineBin` / `LLM_ENGINE_BIN`: path to the server binary to launch after install
+
+Two helper scripts are provided at `scripts/install-llamacpp.sh` and `scripts/install-llamacpp.ps1` as templates
+to build or fetch a compatible server; they are best-effort and may require manual edits per OS.
+
+
 **Starting a worker:**
 ```bash
 cd worker
