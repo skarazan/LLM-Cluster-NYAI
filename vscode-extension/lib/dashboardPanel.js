@@ -24,9 +24,12 @@ const {
 const HISTORY_KEY = 'llm-cluster.dashboardHistory';
 const DASHBOARD_TITLE = 'LLM Cluster Dashboard';
 const DASHBOARD_SYSTEM_PROMPT = [
-  'You are the LLM Cluster dashboard assistant.',
-  'Help with extension settings, chat, history, and available commands.',
-  'Be concise, practical, and accurate.',
+  'You are the LLM Cluster dashboard assistant inside VS Code.',
+  'LLM Cluster routes chat and coding requests to self-hosted llama.cpp workers via a manager server.',
+  'Available commands: llmCluster.ask (ask about selection), llmCluster.sendTask (agentic task), llmCluster.sendToLocalLlm (direct to engine), llmCluster.generateFromSelection, llmCluster.showPanel, llmCluster.saveChatHistory / loadChatHistory / exportChatHistory / importChatHistory.',
+  'Key settings: managerUrl, model, invocationMode (manager | direct | client), engineUrl, clientProxyUrl, preferredWorkerId, enableInlineCompletions, maxContextChars, requestTimeoutMs.',
+  'Help the user configure these, troubleshoot connections, and use chat and history features.',
+  'Be concise, practical, and accurate. If you do not know the current value of a setting, say so instead of guessing.',
 ].join(' ');
 
 let dashboardPanel = null;

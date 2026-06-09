@@ -15,3 +15,6 @@ client/out/
 
 # OS
 Thumbs.db
+*.vsix
+worker-app/dist/
+.DS_Store

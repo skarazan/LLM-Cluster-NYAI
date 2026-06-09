@@ -142,28 +142,22 @@ function buildSystemPrompt(state, mode) {
   const selectedSkills = normalized.skills.filter((skill) => selectedSkillIds.includes(skill.id) && skill.enabled !== false);
 
   const sections = [
-    `You are an AI agent operating in ${mode === 'code' ? 'code' : 'chat'} mode.`,
+    `You are a coding assistant inside VS Code, operating in ${mode === 'code' ? 'code' : 'chat'} mode.`,
   ];
 
-  if (prompt) {
-    sections.push([
-      `Default prompt preset: ${prompt.name}`,
-      prompt.instruction || '(no instruction provided)',
-    ].join('\n'));
+  if (prompt && prompt.instruction) {
+    sections.push(prompt.instruction);
   }
 
   if (selectedSkills.length) {
     sections.push([
-      'Selected skills:',
-      ...selectedSkills.map((skill) => `- ${skill.name}: ${skill.instruction || ''}`.trimEnd()),
+      'Working rules:',
+      ...selectedSkills.map((skill) => `- ${skill.instruction || skill.name}`.trimEnd()),
     ].join('\n'));
-  } else if (selectedSkillIds.length === 0) {
-    sections.push('Selected skills: none');
   }
 
   sections.push(
-    'Follow the selected prompt preset and skills closely.',
-    'If a skill conflicts with the user request, explain the conflict briefly and choose the safest useful behavior.'
+    'Follow these instructions closely. If one conflicts with the user request, note the conflict in one line and choose the safest useful behavior.'
   );
 
   return sections.join('\n\n');

@@ -125,9 +125,11 @@ function buildInlineMessages(document, position) {
       role: 'system',
       content: [
         'You are a code completion engine inside VS Code.',
-        'Return only the text that should be inserted at the cursor.',
+        'Return only the text that should be inserted at the cursor — it must join seamlessly with the text before and after the cursor.',
+        'Do not repeat any text that already appears before the cursor or in <after_cursor>.',
+        'Stop at a natural boundary: the end of the current statement, block, or function. Do not continue past what the surrounding code needs.',
         'Do not use markdown, code fences, bullet points, or explanations.',
-        'Preserve the surrounding language, indentation, and formatting.',
+        'Preserve the surrounding language, indentation style, and formatting.',
         'If no completion is appropriate, return an empty string.',
       ].join(' '),
     },
@@ -159,8 +161,10 @@ function buildChatMessages(document, selectionText, prompt, promptStudioState) {
     ? buildSystemPrompt(promptStudioState, 'chat')
     : [
         'You are a VS Code coding assistant.',
-        'Be concise and output only the requested code or explanation.',
-        'If the user asks for code changes, return the updated code only unless they ask otherwise.',
+        'Be concise and output only the requested code or explanation — no preamble, no restating the question.',
+        'If the user asks for code changes, return the complete updated code only, with no commentary, unless they ask otherwise.',
+        'Match the language, style, and indentation of the provided context.',
+        'If the request is ambiguous, state your assumption in one line and proceed.',
       ].join(' ');
 
   return [
@@ -202,9 +206,13 @@ function buildTaskMessages(document, selectionText, prompt, workspaceRoot, promp
   const systemContent = promptStudioState
     ? buildSystemPrompt(promptStudioState, 'code')
     : [
-        'You are a coding task agent routed through the LLM Cluster manager.',
-        'Use tools when needed and keep edits scoped to the user request.',
-        'When you finish all requested work, return a concise completion summary.',
+        'You are a coding task agent working in the user\'s VS Code workspace, routed through the LLM Cluster manager.',
+        'Work autonomously with the provided tools until the task is complete — do not ask the user what to do next.',
+        'Read a file before editing or overwriting it; never guess at existing content.',
+        'Use absolute paths under the workspace root for every file operation.',
+        'Keep edits scoped to the user request — no drive-by refactors or extra files.',
+        'After changes, verify with the cheapest available check (build, test, or run) when possible.',
+        'When you finish all requested work, return a short summary: files changed and how to verify.',
       ].join(' ');
 
   return [
