@@ -13,9 +13,16 @@ const {
   submitJobResult,
   emitChunk,
 } = require('../services/workerService');
+const {
+  requireApiKey,
+  checkWorkerSecret,
+  issueWorkerToken,
+  revokeWorkerTokens,
+  requireWorkerToken,
+} = require('../middleware/auth');
 
 // GET /workers — lists all registered workers (strip non-serializable internals)
-router.get('/', (req, res) => {
+router.get('/', requireApiKey, (req, res) => {
   const workers = getAllWorkers().map(({ id, stableId, name, ip, port, models, status, capacity, metrics, inflight, version, lastSeen }) => ({
     id, stableId, name, ip, port, models, status, capacity, metrics, inflight, version, lastSeen,
   }));
@@ -24,16 +31,19 @@ router.get('/', (req, res) => {
 
 // POST /workers/register — worker self-registers on startup
 router.post('/register', (req, res) => {
+  if (!checkWorkerSecret(req)) {
+    return res.status(401).json({ error: 'Invalid or missing worker secret' });
+  }
   const { name, ip, port, models, capacity, version, stableId } = req.body;
   if (!name || !ip) {
     return res.status(400).json({ error: 'Missing required fields: name, ip' });
   }
   const id = registerWorker({ name, ip, port, models, capacity, version, stableId });
-  res.status(201).json({ id });
+  res.status(201).json({ id, token: issueWorkerToken(id) });
 });
 
 // POST /workers/heartbeat — worker keeps its registration alive
-router.post('/heartbeat', (req, res) => {
+router.post('/heartbeat', requireWorkerToken, (req, res) => {
   const { id, metrics } = req.body;
   if (!id) return res.status(400).json({ error: 'Missing required field: id' });
   const ok = refreshHeartbeat(id, metrics);
@@ -41,7 +51,7 @@ router.post('/heartbeat', (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/job-heartbeat', (req, res) => {
+router.post('/job-heartbeat', requireWorkerToken, (req, res) => {
   const { workerId, jobId, stage } = req.body || {};
   if (!workerId || !jobId) return res.status(400).json({ error: 'Missing workerId or jobId' });
   const ok = markJobHeartbeat(jobId, workerId, stage || 'running');
@@ -50,28 +60,29 @@ router.post('/job-heartbeat', (req, res) => {
 });
 
 // DELETE /workers/deregister — worker removes itself cleanly on shutdown
-router.delete('/deregister', (req, res) => {
+router.delete('/deregister', requireWorkerToken, (req, res) => {
   const { id } = req.body;
   if (!id) return res.status(400).json({ error: 'Missing required field: id' });
   const ok = deregisterWorker(id);
   if (!ok) return res.status(404).json({ error: 'Worker not found' });
+  revokeWorkerTokens(id);
   res.json({ ok: true });
 });
 
 // GET /workers/poll/:id — worker long-polls for a job (pull-based dispatch)
-router.get('/poll/:id', (req, res) => {
+router.get('/poll/:id', requireWorkerToken, (req, res) => {
   pollForJob(req.params.id, res);
 });
 
 // POST /workers/chunk — worker forwards a streaming token chunk
-router.post('/chunk', (req, res) => {
+router.post('/chunk', requireWorkerToken, (req, res) => {
   const { jobId, content } = req.body;
   if (jobId && content) emitChunk(jobId, content);
   res.json({ ok: true });
 });
 
 // POST /workers/result — worker submits completed job result
-router.post('/result', (req, res) => {
+router.post('/result', requireWorkerToken, (req, res) => {
   const { jobId, result, error } = req.body;
   if (!jobId) return res.status(400).json({ error: 'Missing jobId' });
   const ok = submitJobResult(jobId, result, error);

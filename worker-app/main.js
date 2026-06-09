@@ -187,7 +187,11 @@ ipcMain.handle('worker:status', () => workerProcess.getStatus());
 ipcMain.handle('history:list', () => chatHistory.listConversations());
 ipcMain.handle('history:get', (_e, id) => chatHistory.getConversation(id));
 ipcMain.handle('history:auth', (_e, password) => {
-  return password === 'SabaBaba' || password === 'BabaSaba';
+  // Gate is opt-in: history stays locked until the machine owner sets a
+  // password via config (~/.llm-cluster-worker.json → chatHistoryPassword).
+  const configured = String(configStore.load().chatHistoryPassword || '').trim();
+  if (!configured) return false;
+  return password === configured;
 });
 
 // ── IPC: Auto-update ─────────────────────────────────────────────────────────

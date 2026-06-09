@@ -3,6 +3,7 @@ const os = require('os');
 const chatRoutes = require('./routes/chatRoutes');
 const workerRoutes = require('./routes/workerRoutes');
 const openaiRoutes = require('./routes/openaiRoutes');
+const { requireApiKey } = require('./middleware/auth');
 
 const app = express();
 const PORT = 3000;
@@ -13,12 +14,18 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'LLM Cluster backend is running.' });
 });
 
-app.use('/chat', chatRoutes);
+app.use('/chat', requireApiKey, chatRoutes);
 app.use('/workers', workerRoutes);
-app.use('/v1', openaiRoutes);
+app.use('/v1', requireApiKey, openaiRoutes);
 
 app.listen(PORT, () => {
   console.log(`Backend running at http://localhost:${PORT}`);
+  if (!process.env.CLUSTER_API_KEY) {
+    console.warn('[auth] CLUSTER_API_KEY not set — /chat and /v1 are OPEN. Set it before exposing this manager publicly.');
+  }
+  if (!process.env.WORKER_SHARED_SECRET) {
+    console.warn('[auth] WORKER_SHARED_SECRET not set — anyone can register as a worker.');
+  }
 
   // mDNS advertisement — lets clients and workers auto-discover this manager on the LAN
   // Set MDNS=0 to disable (e.g. on networks that block multicast)

@@ -204,12 +204,17 @@ class ChatViewProvider {
 
       if (message.type === 'executeLLMCommand') {
         const cmd = String(message.command || '').trim();
-        if (cmd) {
+        // Only commands this extension contributes — the webview is untrusted
+        // input and must not be able to invoke arbitrary VS Code commands.
+        const allowed = cmd.startsWith('llmCluster.');
+        if (cmd && allowed) {
           try {
             await vscode.commands.executeCommand(cmd);
           } catch (err) {
             vscode.window.showErrorMessage('Failed to execute command: ' + err.message);
           }
+        } else if (cmd) {
+          vscode.window.showErrorMessage('Blocked non-LLM Cluster command: ' + cmd);
         }
       }
 

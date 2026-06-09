@@ -15,6 +15,10 @@ function getModelName() {
   return String(getConfig().get('model', 'Qwen 2.5 Coder 7B')).trim();
 }
 
+function getApiKey() {
+  return String(getConfig().get('apiKey', '') || '').trim();
+}
+
 function getTimeoutMs() {
   const value = Number(getConfig().get('requestTimeoutMs', 120000));
   return Number.isFinite(value) && value > 0 ? value : 120000;
@@ -118,6 +122,7 @@ module.exports = {
   getConfig,
   getManagerBaseUrl,
   getModelName,
+  getApiKey,
   getTimeoutMs,
   getInvocationMode,
   getEngineEndpoint,

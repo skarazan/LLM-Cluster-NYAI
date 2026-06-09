@@ -271,6 +271,12 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// Manager API key: renderer-provided value wins, env var is the fallback.
+function clusterAuthHeader(apiKey) {
+  const key = String(apiKey || process.env.LLM_CLUSTER_API_KEY || '').trim();
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
 // Quick health check against backend
 ipcMain.handle('ping-backend', async (event, { backendUrl }) => {
   try {
@@ -286,7 +292,7 @@ ipcMain.handle('ping-backend', async (event, { backendUrl }) => {
 
 // Forward chat requests from renderer to backend (avoids CORS issues)
 // Streams token chunks via IPC 'stream-chunk' events before returning the final response.
-ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools, requestId, agentMode }) => {
+ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools, requestId, agentMode, webSearch, apiKey }) => {
   const controller = new AbortController();
   if (requestId) activePromptControllers.set(requestId, controller);
   try {
@@ -294,9 +300,10 @@ ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools
     if (tools && tools.length > 0) body.tools = tools;
     if (requestId) body.requestId = requestId;
     if (agentMode) body.agentMode = agentMode;
+    if (webSearch) body.webSearch = true;
     const res = await fetch(`${backendUrl}/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...clusterAuthHeader(apiKey) },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -339,14 +346,14 @@ ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools
   }
 });
 
-ipcMain.handle('cancel-prompt', async (event, { backendUrl, requestId }) => {
+ipcMain.handle('cancel-prompt', async (event, { backendUrl, requestId, apiKey }) => {
   if (!requestId) return { ok: false, error: 'Missing requestId' };
   const controller = activePromptControllers.get(requestId);
   if (controller) controller.abort();
   try {
     await fetch(`${backendUrl}/chat/cancel`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...clusterAuthHeader(apiKey) },
       body: JSON.stringify({ requestId }),
     });
   } catch {

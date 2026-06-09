@@ -30,6 +30,19 @@ function authHeaders(engine) {
   return engine.apiKey ? { Authorization: `Bearer ${engine.apiKey}` } : {};
 }
 
+// ---------- Manager auth ----------
+// Shared secret proves this worker may join the fleet; the manager answers
+// registration with a per-worker token used on every subsequent call.
+
+let workerToken = '';
+let workerSecret = '';
+
+function managerHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (workerToken) headers['x-worker-token'] = workerToken;
+  return headers;
+}
+
 // ---------- Config loader ----------
 
 function loadConfig() {
@@ -137,12 +150,19 @@ async function register(managerUrl, name, ip, port, models, capacity) {
   try {
     res = await fetch(`${managerUrl}/workers/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(workerSecret ? { 'x-worker-secret': workerSecret } : {}),
+      },
       body: JSON.stringify({ name, ip, port, models, capacity, version: '3.0', stableId }),
     });
   } catch (err) {
     console.error(`Cannot reach manager at ${managerUrl}.`);
     console.error(err.message);
+    process.exit(1);
+  }
+  if (res.status === 401) {
+    console.error('Registration rejected: worker secret missing or wrong. Set LLM_WORKER_SECRET (or "workerSecret" in ~/.llm-cluster-worker.json) to match the manager\'s WORKER_SHARED_SECRET.');
     process.exit(1);
   }
   if (!res.ok) {
@@ -151,6 +171,7 @@ async function register(managerUrl, name, ip, port, models, capacity) {
     process.exit(1);
   }
   const data = await res.json();
+  if (data.token) workerToken = data.token;
   return data.id;
 }
 
@@ -162,7 +183,7 @@ async function sendHeartbeat(managerUrl, id) {
   try {
     const res = await fetch(`${managerUrl}/workers/heartbeat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: managerHeaders(),
       body: JSON.stringify({ id, metrics: { cpuPct, loadAvg1 } }),
     });
     if (!res.ok) console.warn(`[heartbeat] manager responded ${res.status}`);
@@ -175,7 +196,7 @@ async function sendJobHeartbeat(managerUrl, workerId, jobId, stage = 'running') 
   try {
     const res = await fetch(`${managerUrl}/workers/job-heartbeat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: managerHeaders(),
       body: JSON.stringify({ workerId, jobId, stage }),
     });
     if (!res.ok && res.status !== 404) console.warn(`[job-heartbeat] manager responded ${res.status}`);
@@ -188,7 +209,7 @@ async function deregister(managerUrl, id) {
   try {
     await fetch(`${managerUrl}/workers/deregister`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
+      headers: managerHeaders(),
       body: JSON.stringify({ id }),
     });
     console.log('Deregistered from manager. Goodbye.');
@@ -535,7 +556,7 @@ async function submitResultWithRetry(managerUrl, jobId, result, error) {
     try {
       const res = await fetch(`${managerUrl}/workers/result`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: managerHeaders(),
         body: JSON.stringify({ jobId, result, error }),
       });
 
@@ -567,7 +588,7 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
       let res;
       try {
         res = await fetch(`${managerUrl}/workers/poll/${id}`, {
-          headers: { 'Content-Type': 'application/json' },
+          headers: managerHeaders(),
           signal: controller.signal,
         });
       } finally {
@@ -611,7 +632,7 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
       }
       fetch(`${managerUrl}/workers/chunk`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: managerHeaders(),
         body: JSON.stringify({ jobId: job.id, content }),
       }).catch(() => {});
     };
@@ -654,6 +675,7 @@ async function pollLoop(managerUrl, id, engine, maxThreads, numCtx) {
 async function main() {
   const config = loadConfig();
   const engine = resolveEngine(config);
+  workerSecret = config.workerSecret || process.env.LLM_WORKER_SECRET || '';
 
   const cores         = os.cpus().length;
   const maxThreads    = config.maxThreads    || Math.max(2, Math.round(cores * 0.85));

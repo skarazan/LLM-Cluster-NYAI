@@ -119,6 +119,11 @@
           "default": "Qwen 2.5 Coder 7B",
           "description": "Model name requested from the manager. It must match a worker model name or prefix."
         },
+        "llmCluster.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the manager (sent as Bearer token). Leave empty if the manager has no CLUSTER_API_KEY set."
+        },
         "llmCluster.enableInlineCompletions": {
           "type": "boolean",
           "default": true,

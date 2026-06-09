@@ -4,6 +4,7 @@ const vscode = require('vscode');
 const {
   getManagerBaseUrl,
   getModelName,
+  getApiKey,
   getTimeoutMs,
   getInvocationMode,
   getEngineEndpoint,
@@ -85,10 +86,12 @@ async function requestCompletion(messages, token, onChunk, options = {}) {
       endpoint = `${managerBaseUrl}/chat`;
     }
 
+    const apiKey = getApiKey();
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       },
       body: JSON.stringify({
         model: getModelName(),
@@ -140,8 +143,10 @@ async function requestCompletion(messages, token, onChunk, options = {}) {
             // not JSON — fall through to treat as raw text
           }
           if (!handled) {
-            accumulated += trimmed;
-            try { if (typeof onChunk === 'function') onChunk(trimmed); } catch {}
+            // Preserve the raw line (plus the newline the split consumed) so
+            // plain-text streams keep their whitespace and line structure.
+            accumulated += line + '\n';
+            try { if (typeof onChunk === 'function') onChunk(line + '\n'); } catch {}
           }
         }
       }
@@ -159,8 +164,8 @@ async function requestCompletion(messages, token, onChunk, options = {}) {
             try { if (typeof onChunk === 'function') onChunk(obj.response); } catch {}
           }
         } catch {
-          accumulated += tb;
-          try { if (typeof onChunk === 'function') onChunk(tb); } catch {}
+          accumulated += buffer;
+          try { if (typeof onChunk === 'function') onChunk(buffer); } catch {}
         }
       }
 

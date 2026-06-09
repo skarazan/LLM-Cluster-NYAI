@@ -50,6 +50,33 @@ router.post('/chat/completions', async (req, res) => {
   const completionId = `chatcmpl-${randomUUID().slice(0, 12)}`;
   const created = Math.floor(Date.now() / 1000);
 
+  // SSE headers may only be written once; after the first byte streams out we
+  // can no longer retry on another worker — we must terminate the stream.
+  let sseStarted = false;
+  const startSse = () => {
+    if (sseStarted) return;
+    sseStarted = true;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    // Send role chunk first (like OpenAI does)
+    res.write(`data: ${JSON.stringify({
+      id: completionId,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+    })}\n\n`);
+  };
+  const endSseWithError = (message, type) => {
+    try {
+      res.write(`data: ${JSON.stringify({ error: { message, type } })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    } catch {}
+  };
+
   for (let attempt = 0; attempt < 3; attempt++) {
     const worker = pickWorker(model, tried);
     if (!worker) break;
@@ -59,21 +86,8 @@ router.post('/chat/completions', async (req, res) => {
 
     if (stream) {
       // --- SSE streaming ---
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-
-      // Send role chunk first (like OpenAI does)
-      res.write(`data: ${JSON.stringify({
-        id: completionId,
-        object: 'chat.completion.chunk',
-        created,
-        model,
-        choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
-      })}\n\n`);
-
       addChunkListener(jobId, (content) => {
+        startSse();
         const chunk = {
           id: completionId,
           object: 'chat.completion.chunk',
@@ -89,6 +103,7 @@ router.post('/chat/completions', async (req, res) => {
         removeChunkListener(jobId);
         decInflight(worker.id);
 
+        startSse();
         // Send final chunk with finish_reason
         res.write(`data: ${JSON.stringify({
           id: completionId,
@@ -112,8 +127,17 @@ router.post('/chat/completions', async (req, res) => {
         decInflight(worker.id);
         tried.add(worker.id);
         if (err.name === 'AbortError') {
-          res.write(`data: ${JSON.stringify({ error: { message: err.message, type: 'timeout_error' } })}\n\n`);
-          res.end();
+          if (sseStarted) {
+            endSseWithError(err.message, 'timeout_error');
+          } else {
+            res.status(504).json({ error: { message: err.message, type: 'timeout_error' } });
+          }
+          return;
+        }
+        // Partial content already streamed from this worker — cannot retry
+        // on another worker without duplicating output. Terminate cleanly.
+        if (sseStarted) {
+          endSseWithError('Worker failed mid-stream', 'server_error');
           return;
         }
         continue;
