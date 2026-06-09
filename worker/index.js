@@ -86,7 +86,25 @@ async function getLocalModels(engine) {
   } catch (err) {
     console.error(`Cannot reach ${engine.type} at ${engine.url}. Is it running?`);
     console.error(err.message);
-    process.exit(1);
+    // If using llamacpp, attempt to auto-start it before quitting
+    if (engine.type === 'llamacpp') {
+      try {
+        const { ensureRunning } = require('./lib/llamacppManager');
+        const started = await ensureRunning(engine);
+        if (started) {
+          console.log('[llamacpp] engine started, retrying model discovery...');
+          res = await fetch(url, { headers: authHeaders(engine) });
+        } else {
+          console.error('[llamacpp] auto-start failed; aborting');
+          process.exit(1);
+        }
+      } catch (e) {
+        console.error('[llamacpp] auto-start attempt failed:', e.message);
+        process.exit(1);
+      }
+    } else {
+      process.exit(1);
+    }
   }
   if (!res.ok) {
     console.error(`${engine.type} responded with HTTP ${res.status}`);

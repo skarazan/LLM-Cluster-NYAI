@@ -189,8 +189,11 @@ Download **LLM Cluster Chat** from the [latest release](https://github.com/skara
 ```bash
 cd client
 npm install
+
+## VS Code Extension
+
+A development VS Code extension lives in [vscode-extension/](vscode-extension/). It adds inline completions plus basic ask/generate commands backed by the same manager API.
 npm start
-```
 
 Enter the manager URL in the top bar and click **Test**. Green dot = connected, pick a model from the dropdown, start chatting.
 
@@ -297,10 +300,20 @@ xattr -cr "/Applications/LLM Cluster Worker.app"
 **Windows: Can't uninstall old Worker App ("app is still running")**
 The old uninstaller doesn't kill processes. Run these in PowerShell as Admin:
 ```powershell
-taskkill /F /IM "LLM Cluster Worker.exe" /T
-taskkill /F /IM llama-server.exe /T
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\llm-cluster-worker"
-Remove-Item -Recurse -Force "$env:APPDATA\llm-cluster-worker-app"
+Kill everything related
+Get-Process | Where-Object { $_.Path -like "*LLM Cluster Worker*" -or $_.Path -like "*llama-server*" } | Stop-Process -Force
+
+# Delete the install folder (oneClick NSIS installs here by default)
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\LLM Cluster Worker" -ErrorAction SilentlyContinue
+
+# Remove uninstall registry entry so Windows doesn't think it's still installed
+Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" |
+  Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -like "*LLM Cluster Worker*" } |
+  Remove-Item -Recurse -Force
+
+# Remove Start Menu shortcut
+Remove-Item -Force "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\LLM Cluster Worker.lnk" -ErrorAction SilentlyContinue
+
 ```
 Then install the latest version fresh. Versions 1.0.5+ handle this automatically.
 

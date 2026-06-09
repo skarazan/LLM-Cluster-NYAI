@@ -173,10 +173,18 @@ setInterval(() => {
 
 // ---------- Worker selection ----------
 
-function pickWorker(model, exclude = new Set()) {
+function pickWorker(model, exclude = new Set(), preferredWorkerId = '') {
   if (workers.size === 0) return null;
   let candidates = Array.from(workers.values()).filter(w => !exclude.has(w.id));
   if (candidates.length === 0) return null;
+
+  const preferredId = String(preferredWorkerId || '').trim();
+  if (preferredId) {
+    const preferredWorker = candidates.find((worker) => worker.id === preferredId);
+    if (preferredWorker) {
+      return preferredWorker;
+    }
+  }
 
   const modelLower = model.toLowerCase();
   const modelFiltered = candidates.filter(w =>
