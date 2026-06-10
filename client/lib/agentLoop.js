@@ -220,7 +220,9 @@ Do NOT output source code. Do NOT call tools.`,
   ];
 
   setLoading(true);
-  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: planMessages, model, agentMode: 'code', requestId });
+  // Planning benefits from hybrid-thinking reasoning (Qwen3.6); execution
+  // turns explicitly disable it so tool calls never land inside <think>.
+  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: planMessages, model, agentMode: 'code', requestId, enableThinking: true });
   setLoading(false);
 
   if (abortRef.aborted || !r.ok) return null;
@@ -528,16 +530,15 @@ async function runAgentTurn(opts) {
     .join(', ');
   const systemMsg = {
     role: 'system',
-    content: `You are Code Agent. Workspace: ${workspace}
+    content: `You are Code Agent, an autonomous coding agent. Workspace: ${workspace}
 
-FILE WRITING — use XML tags in your text response:
-<write_file path="${workspace}/path/to/file.html">complete file content here</write_file>
-<append_file path="${workspace}/path/to/file.html">more content</append_file>
-- All paths MUST be absolute, starting with "${workspace}/"
-- Content between tags is raw text — double quotes are fine, no escaping needed.
-- For large files (>80 lines): <write_file> first 80 lines, <append_file> for rest.
-- Write real, complete code — no placeholders, no TODOs, no "content here".
-- Do NOT use write_file/append_file as tool calls. Do NOT use run_shell to write files.
+HARD RULES:
+1. Write real, complete code — no placeholders, no TODOs, no "content here", no truncated bodies.
+2. All file paths MUST be absolute, starting with "${workspace}/".
+3. Never use write_file/append_file as tool calls and never use run_shell to write files — file content goes in XML text blocks (format below).
+4. Fill in EVERY tool call parameter explicitly — never omit one and never rely on defaults.
+5. Complete the ENTIRE task autonomously. Do not ask the user what to do next.
+6. Cross-check all interfaces between files — function signatures, prop names, event names must match EXACTLY.
 
 CRITICAL — FILES OPEN VIA file:// PROTOCOL (no server, no bundler):
 - NEVER use import/export, require(), or <script type="module"> in ANY file. They FAIL on file://.
@@ -548,15 +549,21 @@ CRITICAL — FILES OPEN VIA file:// PROTOCOL (no server, no bundler):
 - CDN frameworks (React, Vue, Three.js, etc.) are GLOBAL after their <script> loads. Do NOT import them.
 - Multi-file projects: each file reads globals from previous scripts and assigns its own globals for later scripts.
 - Load dependency scripts BEFORE the scripts that use them. The last script must initialize/mount the app.
-- Cross-check all interfaces between files — function signatures, prop names, event names must match EXACTLY.
 
-TOOL CALLS (for everything else): ${toolCallNames}
-- Use edit_file for small changes to existing files.
-- Use read_file to inspect files. Use run_shell for npm, tests, builds, open.
+TOOL CALLS (for everything except writing files): ${toolCallNames}
+- Use read_file to inspect files. Use edit_file for small changes to existing files. Use run_shell for npm, tests, builds, open.
 
-WORKFLOW:
-- Complete the ENTIRE task autonomously. Do not ask the user what to do next.
-- Say "Done." with a summary only when finished.
+FILE WRITING — use XML tags in your text response:
+- Content between tags is raw text — double quotes are fine, no escaping needed.
+- For large files (>80 lines): <write_file> first 80 lines, then <append_file> for the rest.
+
+Example — creating a file:
+<write_file path="${workspace}/index.html"><!DOCTYPE html>
+<html>
+...complete real content...
+</html></write_file>
+
+STOP CONDITION: Say "Done." with a short summary only when every todo is complete. If you are blocked after two failed attempts at the same action, say what is blocking you instead of retrying again.
 ${activeManifest ? `\nFILE MANIFEST:\n${activeManifest}` : ''}
 ${formatTodoListForPrompt(taskTodos)}
 `,
@@ -736,6 +743,7 @@ ${formatTodoListForPrompt(taskTodos)}
       tools: filteredTools,
       requestId,
       agentMode: 'code',
+      enableThinking: false,
     });
     setLoading(false);
 

@@ -271,6 +271,22 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// Plain chat sends raw history with no system prompt — small local models
+// drift without one. Injected only when the conversation has none.
+function defaultChatSystemMessage() {
+  const today = new Date().toISOString().slice(0, 10);
+  return {
+    role: 'system',
+    content: [
+      'You are a helpful assistant running on LLM Cluster, a self-hosted university GPU cluster.',
+      `Today's date is ${today}.`,
+      'Be direct and concise. Answer the question asked, without padding.',
+      'If you are not sure about a fact, say so plainly instead of guessing.',
+      'Preserve code formatting in fenced code blocks.',
+    ].join(' '),
+  };
+}
+
 // Manager API key: renderer-provided value wins, env var is the fallback.
 function clusterAuthHeader(apiKey) {
   const key = String(apiKey || process.env.LLM_CLUSTER_API_KEY || '').trim();
@@ -292,15 +308,17 @@ ipcMain.handle('ping-backend', async (event, { backendUrl }) => {
 
 // Forward chat requests from renderer to backend (avoids CORS issues)
 // Streams token chunks via IPC 'stream-chunk' events before returning the final response.
-ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools, requestId, agentMode, webSearch, apiKey }) => {
+ipcMain.handle('send-prompt', async (event, { backendUrl, messages, model, tools, requestId, agentMode, webSearch, apiKey, enableThinking }) => {
   const controller = new AbortController();
   if (requestId) activePromptControllers.set(requestId, controller);
   try {
-    const body = { messages, model };
+    const needsSystem = !agentMode && Array.isArray(messages) && messages.length > 0 && messages[0]?.role !== 'system';
+    const body = { messages: needsSystem ? [defaultChatSystemMessage(), ...messages] : messages, model };
     if (tools && tools.length > 0) body.tools = tools;
     if (requestId) body.requestId = requestId;
     if (agentMode) body.agentMode = agentMode;
     if (webSearch) body.webSearch = true;
+    if (typeof enableThinking === 'boolean') body.enableThinking = enableThinking;
     const res = await fetch(`${backendUrl}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...clusterAuthHeader(apiKey) },

@@ -15,10 +15,10 @@ const TOOL_DEFINITIONS = [
       type: 'object',
       properties: {
         path:   { type: 'string', description: 'Path to the file (relative to workspace root or absolute).' },
-        offset: { type: 'number', description: 'Line number to start reading from (1-indexed). Optional.' },
-        limit:  { type: 'number', description: 'Maximum number of lines to read. Optional, max 5000.' },
+        offset: { type: 'number', description: 'Line number to start reading from (1-indexed). Use 1 to start at the beginning.' },
+        limit:  { type: 'number', description: 'Maximum number of lines to read. Use 300 for a preview, 5000 for a full read. Max 5000.' },
       },
-      required: ['path'],
+      required: ['path', 'offset', 'limit'],
     },
     risk: 'read',
   },
@@ -91,9 +91,9 @@ const TOOL_DEFINITIONS = [
         pattern: { type: 'string', description: 'Search pattern (regex or literal string).' },
         path:    { type: 'string', description: 'File or directory to search in (relative to workspace). Optional, defaults to workspace root.' },
         glob:    { type: 'string', description: 'Glob to filter files, e.g. "*.js". Optional.' },
-        regex:   { type: 'boolean', description: 'If true, treat pattern as regex. Default true.' },
+        regex:   { type: 'boolean', description: 'If true, treat pattern as regex. Pass true unless you need a literal match.' },
       },
-      required: ['pattern'],
+      required: ['pattern', 'regex'],
     },
     risk: 'read',
   },
@@ -187,11 +187,11 @@ const TOOL_DEFINITIONS = [
       type: 'object',
       properties: {
         cmd:        { type: 'string',  description: 'Command name only (e.g. "node", "npm", "open"). Max 100 chars.', maxLength: 100 },
-        args:       { type: 'array',   items: { type: 'string', maxLength: 200 }, description: 'Command arguments as an array. Each arg max 200 chars.' },
+        args:       { type: 'array',   items: { type: 'string', maxLength: 200 }, description: 'Command arguments as an array. Pass [] when there are none. Each arg max 200 chars.' },
         cwd:        { type: 'string',  description: 'Working directory relative to workspace root. Optional.' },
-        timeout_ms: { type: 'number',  description: 'Timeout in milliseconds. Default 30000.' },
+        timeout_ms: { type: 'number',  description: 'Timeout in milliseconds. Use 30000 unless the command needs longer.' },
       },
-      required: ['cmd'],
+      required: ['cmd', 'args', 'timeout_ms'],
     },
     risk: 'shell',
   },
@@ -203,7 +203,10 @@ const TOOL_DEFINITIONS = [
  * always knows the exact path to use without guessing.
  */
 function getToolSchemas(workspace) {
-  return TOOL_DEFINITIONS.filter(({ name }) => name !== 'create_dir').map(({ name, description, parameters }) => {
+  // create_dir: directories are created implicitly by writes.
+  // inspect_project: executed app-side (agent:get-project-context) — exposing
+  // it tempts the model into read loops mid-task.
+  return TOOL_DEFINITIONS.filter(({ name }) => name !== 'create_dir' && name !== 'inspect_project').map(({ name, description, parameters }) => {
     let desc = description;
     if (workspace) {
       // Patch path/root descriptions to include the actual workspace root
