@@ -137,7 +137,7 @@ class ChatViewProvider {
         if (!prompt) {
           return;
         }
-        await this.onSendPrompt(prompt, this);
+        await this.onSendPrompt(prompt, this, Boolean(message.webSearch));
       }
 
       if (message.type === 'sendTask') {
@@ -432,7 +432,7 @@ function activate(context) {
   });
 
   let chatViewProvider;
-  const sendChatPrompt = async (prompt, provider) => {
+  const sendChatPrompt = async (prompt, provider, webSearch = false) => {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
       vscode.window.showInformationMessage('Open a file first to use LLM Cluster.');
@@ -465,7 +465,7 @@ function activate(context) {
         try { output.append(chunk); } catch {}
       };
 
-      const responseText = await requestCompletion(messages, null, onChunk);
+      const responseText = await requestCompletion(messages, null, onChunk, { webSearch });
       provider.messages[provider.messages.length - 1] = { role: 'assistant', text: responseText };
       provider.setBusy(false);
       provider.render();

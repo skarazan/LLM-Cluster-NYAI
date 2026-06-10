@@ -353,6 +353,7 @@ async function ping() {
 async function sendChat(prompt) {
   const backendUrl = urlInput.value.trim();
   const model      = modelSelect.value;
+  const webSearch  = Boolean(document.getElementById('web-search-toggle')?.checked);
 
   history.push({ role: 'user', content: prompt });
   appendBubble('user', prompt);
@@ -360,7 +361,7 @@ async function sendChat(prompt) {
   const placeholder = appendBubble('assistant', 'thinking…');
   placeholder.classList.add('loading');
 
-  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: history, model });
+  const r = await ipcRenderer.invoke('send-prompt', { backendUrl, messages: history, model, webSearch });
   placeholder.remove();
 
   if (r.ok) {

@@ -461,6 +461,7 @@ function buildWebviewHtml(vars) {
         <div class="composer">
           <textarea id="prompt" placeholder="Ask a question, request a refactor, or describe a task for the agent..."></textarea>
           <div class="actions">
+            <label class="secondary" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;" title="Let the model search the web (needs SearXNG on the manager)"><input type="checkbox" id="webSearch" /> Web</label>
             <button id="clear" class="secondary">Clear</button>
             <button id="task" class="secondary">Agent</button>
             <button id="send" class="primary">Send</button>
@@ -1042,12 +1043,15 @@ function buildWebviewHtml(vars) {
       syncPanelMode();
     }
 
+    const webSearchToggle = document.getElementById('webSearch');
+    const webSearchOn = () => Boolean(webSearchToggle && webSearchToggle.checked);
+
     send.addEventListener('click', () => {
       const value = prompt.value.trim();
       if (!value) {
         return;
       }
-      post(panelMode === 'agent' ? 'sendTask' : 'sendPrompt', { prompt: value });
+      post(panelMode === 'agent' ? 'sendTask' : 'sendPrompt', { prompt: value, webSearch: webSearchOn() });
       prompt.value = '';
     });
 
@@ -1056,7 +1060,7 @@ function buildWebviewHtml(vars) {
       if (!value) {
         return;
       }
-      post(panelMode === 'agent' ? 'sendPrompt' : 'sendTask', { prompt: value });
+      post(panelMode === 'agent' ? 'sendPrompt' : 'sendTask', { prompt: value, webSearch: webSearchOn() });
       prompt.value = '';
     });
 

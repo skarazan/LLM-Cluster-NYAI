@@ -100,6 +100,7 @@ async function requestCompletion(messages, token, onChunk, options = {}) {
         ...(mode === 'manager' ? {
           preferredWorkerId: String(options.preferredWorkerId || '').trim(),
           agentMode: options.agentMode || null,
+          ...(options.webSearch ? { webSearch: true } : {}),
         } : {}),
       }),
       signal: controller.signal,
