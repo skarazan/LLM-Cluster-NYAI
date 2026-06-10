@@ -4,14 +4,38 @@ const express = require('express');
 const router  = express.Router();
 const { randomUUID } = require('crypto');
 const { pickWorker, incInflight, decInflight, sendPromptToWorker, addChunkListener, removeChunkListener, cancelJob } = require('../services/workerService');
+const {
+  executeSearchTool,
+  searchPolicyPrompt,
+  wrapToolResult,
+  SEARCH_TOOL_SCHEMAS,
+  SEARCH_TOOL_NAMES,
+} = require('../services/searchService');
+
+const MAX_SEARCH_HOPS = 2;
+
+// Append the search policy to the conversation's system message (or add one).
+function injectSearchPolicy(messages) {
+  if (messages.length > 0 && messages[0].role === 'system') {
+    return [
+      { ...messages[0], content: `${messages[0].content}\n\n${searchPolicyPrompt()}` },
+      ...messages.slice(1),
+    ];
+  }
+  return [{ role: 'system', content: searchPolicyPrompt() }, ...messages];
+}
 
 // POST /chat — smart worker selection with retry/failover (max 3 attempts)
 router.post('/', async (req, res) => {
-  const { messages, model = 'llama3', tools, requestId, agentMode, preferredWorkerId, enableThinking } = req.body;
+  const { messages, model = 'llama3', tools, requestId, agentMode, preferredWorkerId, enableThinking, webSearch } = req.body;
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Missing required field: messages (must be a non-empty array)' });
   }
+
+  const useSearch = webSearch === true;
+  const convoBase = useSearch ? injectSearchPolicy(messages) : messages;
+  const mergedTools = useSearch ? [...(tools || []), ...SEARCH_TOOL_SCHEMAS] : tools;
 
   const tried = new Set();
   let lastErrorMessage = '';
@@ -33,12 +57,49 @@ router.post('/', async (req, res) => {
     let result = null;
 
     const jobId = requestId || randomUUID();
-    addChunkListener(jobId, (content) => {
+    const chunkWriter = (content) => {
       try { res.write(JSON.stringify({ chunk: content }) + '\n'); } catch {}
-    });
+    };
+    addChunkListener(jobId, chunkWriter);
 
     try {
-      result = await sendPromptToWorker(worker, messages, model, tools, jobId, { agentMode, enableThinking });
+      result = await sendPromptToWorker(worker, convoBase, model, mergedTools, jobId, { agentMode, enableThinking });
+
+      // Manager-side search loop: execute web_search/fetch_url/package_version
+      // here (keys + SearXNG live on the manager) and re-prompt the worker.
+      // Mixed or client-side tool calls fall through to the client untouched.
+      if (useSearch) {
+        let convo = convoBase;
+        let hops = 0;
+        while (
+          hops < MAX_SEARCH_HOPS
+          && Array.isArray(result.tool_calls)
+          && result.tool_calls.length > 0
+          && result.tool_calls.every(tc => SEARCH_TOOL_NAMES.has(tc.function?.name))
+        ) {
+          hops++;
+          convo = [...convo, { role: 'assistant', content: result.content || '', tool_calls: result.tool_calls }];
+          for (const tc of result.tool_calls) {
+            let args = {};
+            try { args = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+            const toolOut = await executeSearchTool(tc.function?.name, args);
+            convo.push({
+              role: 'tool',
+              tool_call_id: tc.id || '',
+              content: wrapToolResult(JSON.stringify(toolOut)),
+            });
+          }
+          const hopJobId = randomUUID();
+          addChunkListener(hopJobId, chunkWriter);
+          try {
+            // Last allowed hop drops the search tools to force a final answer.
+            const hopTools = hops >= MAX_SEARCH_HOPS ? tools : mergedTools;
+            result = await sendPromptToWorker(worker, convo, model, hopTools, hopJobId, { agentMode, enableThinking });
+          } finally {
+            removeChunkListener(hopJobId);
+          }
+        }
+      }
     } catch (err) {
       removeChunkListener(jobId);
       decInflight(worker.id);

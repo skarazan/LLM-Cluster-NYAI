@@ -98,6 +98,30 @@ curl http://your-server:3000/workers
 # → {"workers":[]}
 ```
 
+### Securing a public manager
+
+Set these env vars before exposing the manager beyond localhost:
+
+```bash
+export CLUSTER_API_KEY="long-random-string"      # required by clients on /chat, /v1, GET /workers
+export WORKER_SHARED_SECRET="another-long-one"   # required by workers to register
+npm start
+```
+
+Clients send `Authorization: Bearer $CLUSTER_API_KEY` (VS Code: `llmCluster.apiKey` setting; Electron client: `LLM_CLUSTER_API_KEY` env). Workers put the secret in `~/.llm-cluster-worker.json` as `"workerSecret"` or set `LLM_WORKER_SECRET`. Without these vars the manager runs open (dev mode) and logs a warning.
+
+### Web search (optional)
+
+Chat requests with `webSearch: true` (or `web_search: true` on `/v1`, non-streaming) let models call `web_search`, `fetch_url`, and `package_version` tools. Version lookups hit npm/PyPI/crates.io registry APIs directly (no setup). General search needs a local SearXNG:
+
+```bash
+cd infra/searxng
+# edit settings.yml: set a random secret_key
+docker compose up -d        # serves on 127.0.0.1:8888
+```
+
+Manager picks it up via `SEARXNG_URL` (default `http://127.0.0.1:8888`). If SearXNG is down, search degrades gracefully — registry lookups still work.
+
 ---
 
 ## 2. Worker Setup

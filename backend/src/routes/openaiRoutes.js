@@ -12,6 +12,13 @@ const {
   removeChunkListener,
   getAllWorkers,
 } = require('../services/workerService');
+const {
+  executeSearchTool,
+  searchPolicyPrompt,
+  wrapToolResult,
+  SEARCH_TOOL_SCHEMAS,
+  SEARCH_TOOL_NAMES,
+} = require('../services/searchService');
 
 // GET /v1/models — list models available across all workers
 router.get('/models', (req, res) => {
@@ -145,7 +152,31 @@ router.post('/chat/completions', async (req, res) => {
     } else {
       // --- Non-streaming ---
       try {
-        const result = await sendPromptToWorker(worker, messages, model, null, jobId, {});
+        // Extension param web_search: true → manager-side search tool loop.
+        const useSearch = req.body.web_search === true;
+        let convo = useSearch
+          ? (messages[0]?.role === 'system'
+            ? [{ ...messages[0], content: `${messages[0].content}\n\n${searchPolicyPrompt()}` }, ...messages.slice(1)]
+            : [{ role: 'system', content: searchPolicyPrompt() }, ...messages])
+          : messages;
+        let result = await sendPromptToWorker(worker, convo, model, useSearch ? SEARCH_TOOL_SCHEMAS : null, jobId, {});
+        let hops = 0;
+        while (
+          useSearch && hops < 2
+          && Array.isArray(result.tool_calls)
+          && result.tool_calls.length > 0
+          && result.tool_calls.every(tc => SEARCH_TOOL_NAMES.has(tc.function?.name))
+        ) {
+          hops++;
+          convo = [...convo, { role: 'assistant', content: result.content || '', tool_calls: result.tool_calls }];
+          for (const tc of result.tool_calls) {
+            let args = {};
+            try { args = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+            const toolOut = await executeSearchTool(tc.function?.name, args);
+            convo.push({ role: 'tool', tool_call_id: tc.id || '', content: wrapToolResult(JSON.stringify(toolOut)) });
+          }
+          result = await sendPromptToWorker(worker, convo, model, hops >= 2 ? null : SEARCH_TOOL_SCHEMAS, randomUUID(), {});
+        }
         decInflight(worker.id);
 
         res.json({

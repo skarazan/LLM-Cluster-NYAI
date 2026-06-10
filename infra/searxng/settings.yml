@@ -1,0 +1,27 @@
+# LLM Cluster SearXNG config.
+# JSON format MUST be enabled — the manager consumes ?format=json.
+# Google engine stays off: aggregator IPs get banned after a few hundred
+# queries; Bing + Brave + DuckDuckGo are reliable enough combined.
+use_default_settings: true
+
+server:
+  secret_key: "change-me-to-a-long-random-string"
+  limiter: false
+  public_instance: false
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+
+engines:
+  - name: google
+    disabled: true
+  - name: bing
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: duckduckgo
+    disabled: false

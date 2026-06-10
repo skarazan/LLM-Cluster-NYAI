@@ -4,6 +4,7 @@ const chatRoutes = require('./routes/chatRoutes');
 const workerRoutes = require('./routes/workerRoutes');
 const openaiRoutes = require('./routes/openaiRoutes');
 const { requireApiKey } = require('./middleware/auth');
+const { executeSearchTool, SEARCH_TOOL_NAMES } = require('./services/searchService');
 
 const app = express();
 const PORT = 3000;
@@ -17,6 +18,20 @@ app.get('/', (req, res) => {
 app.use('/chat', requireApiKey, chatRoutes);
 app.use('/workers', workerRoutes);
 app.use('/v1', requireApiKey, openaiRoutes);
+
+// Search tools for client-side agent loops — keys and SearXNG stay manager-side.
+app.post('/tools/search', requireApiKey, async (req, res) => {
+  const { tool, args } = req.body || {};
+  if (!SEARCH_TOOL_NAMES.has(String(tool))) {
+    return res.status(400).json({ error: `Unknown search tool: ${tool}` });
+  }
+  try {
+    const result = await executeSearchTool(String(tool), args);
+    res.json({ ok: true, result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Backend running at http://localhost:${PORT}`);
