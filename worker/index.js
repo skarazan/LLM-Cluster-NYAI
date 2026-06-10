@@ -224,22 +224,21 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
   const messages = wrapMessages(job.messages, job.tools);
   const startMs = Date.now();
   const isCodeAgent = job.agentMode === 'code';
+  // Per-job thinking control for hybrid-thinking models (Qwen3 / Qwen3.6):
+  // planning turns want reasoning, execution turns must not emit tool calls
+  // inside <think> blocks (breaks llama.cpp parsing) and waste context.
+  const thinking = job.enableThinking === true;
+  // Qwen-recommended sampling: thinking 0.6/0.95/20, non-thinking 0.7/0.8/20
+  // with presence_penalty 1.5 to break repetition loops.
   const sampling = {
-    temperature: isCodeAgent
-      ? Number(process.env.LLM_CODE_TEMPERATURE || 0.6)
-      : Number(process.env.LLM_CHAT_TEMPERATURE || 0.7),
-    topP: isCodeAgent
-      ? Number(process.env.LLM_CODE_TOP_P || 0.95)
-      : Number(process.env.LLM_CHAT_TOP_P || 0.9),
-    topK: isCodeAgent
-      ? Number(process.env.LLM_CODE_TOP_K || 40)
-      : Number(process.env.LLM_CHAT_TOP_K || 40),
-    presencePenalty: isCodeAgent
-      ? Number(process.env.LLM_CODE_PRESENCE_PENALTY || 0)
-      : Number(process.env.LLM_CHAT_PRESENCE_PENALTY || 0),
-    repeatPenalty: isCodeAgent
-      ? Number(process.env.LLM_CODE_REPEAT_PENALTY || 1.0)
-      : Number(process.env.LLM_CHAT_REPEAT_PENALTY || 1.1),
+    temperature: Number(process.env[thinking ? 'LLM_THINK_TEMPERATURE' : (isCodeAgent ? 'LLM_CODE_TEMPERATURE' : 'LLM_CHAT_TEMPERATURE')]
+      || (thinking ? 0.6 : 0.7)),
+    topP: Number(process.env[thinking ? 'LLM_THINK_TOP_P' : (isCodeAgent ? 'LLM_CODE_TOP_P' : 'LLM_CHAT_TOP_P')]
+      || (thinking ? 0.95 : 0.8)),
+    topK: Number(process.env[isCodeAgent ? 'LLM_CODE_TOP_K' : 'LLM_CHAT_TOP_K'] || 20),
+    presencePenalty: Number(process.env[isCodeAgent ? 'LLM_CODE_PRESENCE_PENALTY' : 'LLM_CHAT_PRESENCE_PENALTY']
+      || (thinking ? 0 : 1.5)),
+    repeatPenalty: Number(process.env[isCodeAgent ? 'LLM_CODE_REPEAT_PENALTY' : 'LLM_CHAT_REPEAT_PENALTY'] || 1.0),
   };
 
   // ── Debug: audit the message array being sent ──────────────────────
@@ -281,10 +280,12 @@ async function runJob(job, engine, maxThreads, numCtx, onChunk) {
       body.tools = job.tools;
       body.tool_choice = 'auto';
     }
-    // Qwen3 thinking: let the model reason before generating code.
-    // File writes use XML tags (not JSON tool calls), so thinking tokens
-    // no longer compete with tool call argument space.
-    // enable_thinking: true is the default — we just don't override it.
+    // Hybrid-thinking control: explicit per-job. Default OFF — Qwen3.6 emits
+    // tool calls inside <think> blocks otherwise, and thinking tokens burn
+    // context in long agent loops. The plan phase opts in via enableThinking.
+    if (typeof job.enableThinking === 'boolean') {
+      body.chat_template_kwargs = { enable_thinking: job.enableThinking };
+    }
   } else {
     url = `${engine.url}/api/chat`;
     body = {

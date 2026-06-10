@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NYIT URE Mini Grant Proposal — LLM Cluster</title>
+<style>
+  @page { size: Letter; margin: 0.75in; }
+  html, body {
+    margin: 0; padding: 0;
+    font-family: "Calibri", "Helvetica Neue", Arial, sans-serif;
+    color: #111; font-size: 11pt; line-height: 1.4;
+  }
+  .page { padding: 0.5in 0.7in; max-width: 7in; margin: 0 auto; }
+  header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    border-bottom: 4px solid #f5b80a; padding-bottom: 12px; margin-bottom: 18px;
+  }
+  header img { height: 78px; }
+  header .title-block {
+    text-align: right; margin-left: 16px; padding-top: 6px;
+  }
+  header h1 {
+    font-size: 14pt; margin: 0 0 4px 0; font-weight: 700;
+    color: #1a1a1a; letter-spacing: 0.2px;
+  }
+  header .subtitle {
+    font-size: 10pt; color: #555; margin: 0;
+  }
+  h2 {
+    font-size: 12pt; margin: 18px 0 6px 0;
+    border-bottom: 1px solid #ccc; padding-bottom: 3px;
+    color: #1a1a1a;
+  }
+  h3 {
+    font-size: 10.5pt; margin: 10px 0 4px 0; color: #333;
+  }
+  p, li { margin: 4px 0 8px 0; }
+  ul { margin: 4px 0 8px 1.2em; padding: 0; }
+  .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+  .meta-table td {
+    padding: 4px 6px; vertical-align: top;
+    border-bottom: 1px solid #eee; font-size: 10.5pt;
+  }
+  .meta-table td.label {
+    width: 28%; font-weight: 600; color: #444;
+  }
+  .deliverable {
+    font-style: italic; color: #555; margin: 2px 0 8px 0; font-size: 10pt;
+  }
+  .sig-row {
+    margin: 22px 0 4px 0;
+    display: flex; align-items: flex-end; justify-content: space-between;
+  }
+  .sig-row .name { font-size: 10pt; color: #333; }
+  .sig-row .line {
+    border-bottom: 1px solid #333;
+    flex: 1; margin: 0 12px;
+    height: 18px;
+  }
+  .sig-row .date { font-size: 10pt; color: #333; min-width: 1.6in; }
+  .sig-section { margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <img src="proposal_assets/logo-000.png" alt="NYIT — College of Engineering and Computing Sciences">
+    <div class="title-block">
+      <h1>Undergraduate Research and Entrepreneurship Program</h1>
+      <p class="subtitle">Mini Grant Proposal</p>
+    </div>
+  </header>
+
+  <table class="meta-table">
+    <tr>
+      <td class="label">Project Title</td>
+      <td>LLM Cluster — Free, Private AI for NYIT Students via Distributed Inference</td>
+    </tr>
+    <tr>
+      <td class="label">Student A</td>
+      <td>Saba Karazanashvili — skarazan@nyit.edu — Computer Science</td>
+    </tr>
+    <tr>
+      <td class="label">Student B</td>
+      <td>Ameer Teyah — ateyah@nyit.edu — Computer Science</td>
+    </tr>
+    <tr>
+      <td class="label">Student C</td>
+      <td>Mate Milorava — mmilorav@nyit.edu — Computer Science</td>
+    </tr>
+    <tr>
+      <td class="label">Faculty Advisor</td>
+      <td>Professor Austin Stietzel — Computer Science</td>
+    </tr>
+    <tr>
+      <td class="label">Project Period</td>
+      <td>September 2026 — Spring 2027</td>
+    </tr>
+  </table>
+
+  <h2>Objective</h2>
+  <p>
+    Commercial AI tools cost $20+/month per user, putting reliable AI access out of reach for many students.
+    Free tiers are rate-limited and route private coursework through third parties.
+  </p>
+  <p>
+    <strong>LLM Cluster</strong> is a distributed inference platform that runs open-source large language models
+    (Llama 3, Mistral) across a small fleet of dedicated worker machines hosted by the project. Students access
+    the service through a lightweight client app — they never install or host worker software themselves. The
+    system gives the NYIT community a free, private AI tool whose data never leaves project-controlled hardware.
+  </p>
+  <p>
+    The grant funds the research needed to turn an early proof-of-concept into a production-ready, evaluated
+    system: scheduling under load, model selection, security, and a formal usability study.
+  </p>
+
+  <h2>Timeline and Deliverables</h2>
+
+  <h3>First Semester (14 weeks)</h3>
+
+  <p><strong>Weeks 1–3 — Literature review and benchmarking.</strong>
+    Survey distributed inference systems and benchmark commercial baselines on a fixed prompt suite for
+    latency and answer quality.</p>
+  <p class="deliverable">Deliverable: literature review + baseline dataset.</p>
+
+  <p><strong>Weeks 4–8 — Core development.</strong>
+    Design and implement load-balanced request routing, streaming responses, worker authentication, and an
+    admin dashboard. Add support for multiple model families.</p>
+  <p class="deliverable">Deliverable: working v1 system.</p>
+
+  <p><strong>Weeks 9–14 — Testing and recalibration.</strong>
+    Internal load testing (50 / 100 / 200 simulated concurrent users). Tune the scheduler. Begin desktop
+    client refinement.</p>
+  <p class="deliverable">Deliverable: performance report + scheduler recommendation.</p>
+
+  <h3>Second Semester (14 weeks)</h3>
+
+  <p><strong>Weeks 1–6 — Human subject study (IRB-approved).</strong>
+    Recruit ~30 NYIT students. Within-subject comparison of LLM Cluster against a commercial baseline on real
+    coursework tasks. Collect latency, answer-quality ratings, and trust measures. Begin mobile (iOS/Android)
+    client development in parallel.</p>
+  <p class="deliverable">Deliverable: study dataset + mobile client beta.</p>
+
+  <p><strong>Weeks 7–14 — Analysis, write-up, dissemination.</strong>
+    Statistical analysis. Draft conference paper for an undergraduate research venue. Public release of the
+    system and mobile app. Final presentation to CoECS faculty.</p>
+  <p class="deliverable">Deliverable: paper + public release + final report.</p>
+
+  <h2>Signatures</h2>
+  <div class="sig-section">
+    <div class="sig-row">
+      <span class="name">Student A — Saba Karazanashvili</span>
+      <span class="line"></span>
+      <span class="date">Date: ____________</span>
+    </div>
+    <div class="sig-row">
+      <span class="name">Student B — Ameer Teyah</span>
+      <span class="line"></span>
+      <span class="date">Date: ____________</span>
+    </div>
+    <div class="sig-row">
+      <span class="name">Student C — Mate Milorava</span>
+      <span class="line"></span>
+      <span class="date">Date: ____________</span>
+    </div>
+    <div class="sig-row">
+      <span class="name">Faculty Advisor — Prof. Austin Stietzel</span>
+      <span class="line"></span>
+      <span class="date">Date: ____________</span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

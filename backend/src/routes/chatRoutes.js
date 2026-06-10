@@ -7,7 +7,7 @@ const { pickWorker, incInflight, decInflight, sendPromptToWorker, addChunkListen
 
 // POST /chat — smart worker selection with retry/failover (max 3 attempts)
 router.post('/', async (req, res) => {
-  const { messages, model = 'llama3', tools, requestId, agentMode, preferredWorkerId } = req.body;
+  const { messages, model = 'llama3', tools, requestId, agentMode, preferredWorkerId, enableThinking } = req.body;
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Missing required field: messages (must be a non-empty array)' });
@@ -38,7 +38,7 @@ router.post('/', async (req, res) => {
     });
 
     try {
-      result = await sendPromptToWorker(worker, messages, model, tools, jobId, { agentMode });
+      result = await sendPromptToWorker(worker, messages, model, tools, jobId, { agentMode, enableThinking });
     } catch (err) {
       removeChunkListener(jobId);
       decInflight(worker.id);

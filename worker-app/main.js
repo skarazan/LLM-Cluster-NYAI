@@ -131,7 +131,8 @@ ipcMain.handle('manager:test', async (_e, url) => {
     const res = await fetch(`${url.replace(/\/$/, '')}/workers`, {
       signal: AbortSignal.timeout(5000),
     });
-    return { ok: res.ok, status: res.status };
+    // 401 means the manager is up but wants an API key — still reachable.
+    return { ok: res.ok || res.status === 401, status: res.status };
   } catch (err) {
     return { ok: false, error: err.message };
   }

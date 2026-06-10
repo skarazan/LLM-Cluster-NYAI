@@ -235,6 +235,8 @@ function sendPromptToWorker(worker, messages, model, tools, jobId, meta = {}) {
       tools,
       workerId: worker.id,
       agentMode: meta.agentMode || null,
+      enableThinking: typeof meta.enableThinking === 'boolean' ? meta.enableThinking : null,
+      webSearch: Boolean(meta.webSearch),
       createdAt: Date.now(),
       dispatchedAt: null,
       cancelled: false,
@@ -261,6 +263,7 @@ function dispatchToWorker(worker, jobId) {
         messages: job.messages,
         maxThreads: worker.capacity.maxThreads,
         agentMode: job.agentMode,
+        enableThinking: job.enableThinking,
       };
       if (job.tools) jobPayload.tools = job.tools;
       waiter.sendJob(jobPayload);
@@ -295,6 +298,7 @@ function pollForJob(workerId, res) {
         messages: job.messages,
         maxThreads: worker.capacity.maxThreads,
         agentMode: job.agentMode,
+        enableThinking: job.enableThinking,
       };
       if (job.tools) jobPayload.tools = job.tools;
       res.json({ job: jobPayload });

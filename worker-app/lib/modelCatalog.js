@@ -14,6 +14,8 @@
  *   hfRepo      — HuggingFace repo
  *   hfFile      — GGUF filename in repo
  *   useCase     — Short description of what it's good at
+ *   thinking    — Model emits <think> blocks (hybrid-thinking family)
+ *   serverFlags — Extra llama-server flags this model needs to behave
  */
 const MODELS = [
   // ── Small (1-4B) — runs on anything ──────────────────────────────────────
@@ -166,6 +168,40 @@ const MODELS = [
     useCase: 'Excellent quality — 24 GB GPU (4090, A5000)',
   },
 
+  // ── Qwen3.6 hybrid-thinking (cluster default targets) ──────────────────
+  // --jinja: apply the model's chat template (tool calls, thinking control).
+  // --reasoning-format deepseek: route <think> output into reasoning_content
+  // so it never leaks into chat content; per-request chat_template_kwargs
+  // still controls whether thinking happens at all.
+  {
+    name: 'Qwen3.6 27B',
+    params: '27B',
+    quant: 'Q4_K_M',
+    fileSizeGB: 16.5,
+    vramGB: 19,
+    maxContext: 262144,
+    contextVRAMperK: 0.20,
+    hfRepo: 'unsloth/Qwen3.6-27B-GGUF',
+    hfFile: 'Qwen3.6-27B-Q4_K_M.gguf',
+    useCase: 'Hybrid-thinking flagship dense — coding + reasoning, 20 GB+ GPUs',
+    thinking: true,
+    serverFlags: ['--jinja', '--reasoning-format', 'deepseek'],
+  },
+  {
+    name: 'Qwen3.6 35B-A3B (MoE)',
+    params: '35B',
+    quant: 'Q4_K_M',
+    fileSizeGB: 21.0,
+    vramGB: 24,
+    maxContext: 262144,
+    contextVRAMperK: 0.22,
+    hfRepo: 'unsloth/Qwen3.6-35B-A3B-GGUF',
+    hfFile: 'Qwen3.6-35B-A3B-Q4_K_M.gguf',
+    useCase: 'Hybrid-thinking MoE — 3B active, fast tokens, 24 GB GPUs',
+    thinking: true,
+    serverFlags: ['--jinja', '--reasoning-format', 'deepseek'],
+  },
+
   // ── Code-specialized ────────────────────────────────────────────────────
   {
     name: 'Qwen 2.5 Coder 7B',
@@ -201,4 +237,16 @@ function getByName(name) {
   return MODELS.find(m => m.name === name) || null;
 }
 
-module.exports = { getAll, getByName, MODELS };
+// Fuzzy match for llama-server flag lookup: model files/ids rarely match the
+// display name exactly, so compare on a normalized alphanumeric form.
+function getServerFlags(nameOrFile) {
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
+  const target = norm(nameOrFile);
+  if (!target) return [];
+  const hit = MODELS.find(m =>
+    m.serverFlags && (target.includes(norm(m.name)) || norm(m.hfFile).includes(target)),
+  );
+  return hit ? [...hit.serverFlags] : [];
+}
+
+module.exports = { getAll, getByName, getServerFlags, MODELS };

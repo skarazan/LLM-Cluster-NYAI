@@ -3,6 +3,7 @@
 const { spawn } = require('child_process');
 const EventEmitter = require('events');
 const path = require('path');
+const modelCatalog = require('./modelCatalog');
 
 class LlamaServerManager extends EventEmitter {
   constructor() {
@@ -45,6 +46,11 @@ class LlamaServerManager extends EventEmitter {
       args.push('--cache-type-k', 'turbo4');
       args.push('--cache-type-v', 'turbo3');
     }
+
+    // Model-specific flags from the catalog (e.g. Qwen3.6 needs --jinja and
+    // --reasoning-format deepseek so <think> output stays out of content).
+    const catalogFlags = modelCatalog.getServerFlags(opts.modelName || path.basename(opts.modelPath || ''));
+    args.push(...catalogFlags);
 
     if (opts.extraArgs) args.push(...opts.extraArgs);
 
