@@ -2,92 +2,206 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="dark">
   <title>LLM Cluster Chat</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
-  <header>
-    <div class="brand">LLM Cluster Chat</div>
-    <div class="connection">
-      <label for="backend-url">Manager URL:</label>
-      <input id="backend-url" type="text" placeholder="http://192.168.1.x:3000" />
-      <button id="discover-btn" class="secondary">Discover</button>
-      <select id="discovered" class="hidden"></select>
-      <select id="model">
-        <optgroup label="Small (1-4B)">
-          <option value="qwen3-1.7b">Qwen3 1.7B</option>
-          <option value="qwen3-4b">Qwen3 4B</option>
-          <option value="llama-3.2-3b">Llama 3.2 3B</option>
-        </optgroup>
-        <optgroup label="Medium (7-9B)">
-          <option value="qwen3-8b">Qwen3 8B</option>
-          <option value="meta-llama-3.1-8b">Llama 3.1 8B</option>
-          <option value="mistral-7b">Mistral 7B</option>
-          <option value="gemma-2-9b">Gemma 2 9B</option>
-          <option value="deepseek-r1-distill">DeepSeek R1 8B</option>
-        </optgroup>
-        <optgroup label="Large (14B+)">
-          <option value="qwen3-14b">Qwen3 14B</option>
-          <option value="qwen3-30b-a3b">Qwen3 30B-A3B (MoE)</option>
-          <option value="qwen3-32b">Qwen3 32B</option>
-          <option value="llama-3.3-70b">Llama 3.3 70B</option>
-        </optgroup>
-        <optgroup label="Code">
-          <option value="qwen2.5-coder-7b">Qwen 2.5 Coder 7B</option>
-          <option value="qwen2.5-coder-32b">Qwen 2.5 Coder 32B</option>
-        </optgroup>
-      </select>
-      <button id="ping-btn">Test</button>
-      <span id="status-dot" class="dot dot-unknown" title="not tested"></span>
+<body class="mode-chat">
+  <!-- ── Title bar (draggable; respects Window Controls Overlay on every OS) ── -->
+  <header class="titlebar" id="titlebar">
+    <div class="titlebar-group">
+      <div class="brand" id="brand">
+        <span class="brand-mark-slot" id="brand-mark"></span>
+        <span class="brand-name">LLM Cluster</span>
+      </div>
+      <div class="segmented" id="mode-switch" role="tablist" aria-label="Mode">
+        <button id="mode-chat" class="segmented-item active" role="tab" aria-selected="true" type="button" title="Chat with a model">
+          <span class="icon-slot" data-icon="chat"></span><span>Chat</span>
+        </button>
+        <button id="mode-code" class="segmented-item" role="tab" aria-selected="false" type="button" title="Let the agent read and edit a workspace">
+          <span class="icon-slot" data-icon="code"></span><span>Code</span>
+        </button>
+      </div>
     </div>
 
-    <!-- Mode toggle -->
-    <div class="mode-toggle" title="Switch between Chat and Code (agentic) mode">
-      <button id="mode-chat" class="mode-btn active">Chat</button>
-      <button id="mode-code" class="mode-btn">Code</button>
-    </div>
+    <div class="titlebar-spacer"></div>
 
-    <!-- Code mode controls (hidden in Chat mode) -->
-    <div id="code-controls" class="code-controls hidden">
-      <button id="workspace-btn" class="secondary">Workspace: <span id="workspace-label">none</span></button>
-      <select id="approval-mode">
-        <option value="strict">Strict</option>
-        <option value="trusted">Trusted</option>
-        <option value="yolo">Yolo ⚡</option>
-      </select>
-      <label class="plan-toggle"><input type="checkbox" id="plan-mode"> Plan</label>
-      <button id="todo-btn" class="secondary">Todo</button>
-      <button id="stop-btn" class="stop-btn hidden">■ Stop</button>
+    <div class="titlebar-group titlebar-actions">
+      <button id="connection-btn" class="conn-pill" type="button" aria-haspopup="dialog" aria-controls="connection-popover" title="Manager connection">
+        <span id="status-dot" class="dot dot-unknown" title="not tested"></span>
+        <span id="connection-label" class="conn-label">Not connected</span>
+        <span class="icon-slot conn-chevron" data-icon="chevronDown" data-size="14"></span>
+      </button>
+      <button id="panel-toggle" class="icon-btn code-only" type="button" title="Toggle progress panel" aria-label="Toggle progress panel" aria-pressed="true">
+        <span class="icon-slot" data-icon="panelRight"></span>
+      </button>
+      <button id="new-chat-btn" class="btn btn-ghost btn-md new-chat-btn" type="button" title="Start a new conversation">
+        <span class="icon-slot" data-icon="plus"></span><span class="btn-label">New chat</span>
+      </button>
     </div>
-
-    <div id="session-tokens" class="session-tokens">in: 0 · out: 0</div>
   </header>
 
-  <div id="update-banner" class="update-banner hidden">
-    <span id="update-msg"></span>
-    <button id="update-btn">Download update</button>
-    <button id="update-dismiss">✕</button>
+  <div id="update-banner" class="banner hidden" role="status">
+    <span class="icon-slot banner-icon" data-icon="download"></span>
+    <span id="update-msg" class="banner-text"></span>
+    <button id="update-btn" class="btn btn-primary btn-sm" type="button">Download update</button>
+    <button id="update-dismiss" class="icon-btn icon-btn-sm" type="button" aria-label="Dismiss update notice" title="Dismiss">
+      <span class="icon-slot" data-icon="x" data-size="14"></span>
+    </button>
   </div>
 
-  <div class="workspace-main">
-    <main id="chat" class="chat"></main>
-    <aside id="activity-panel" class="activity-panel hidden">
-      <div class="activity-panel-header">
-        <div>
-          <div id="activity-title" class="activity-title">Activity</div>
-          <div id="activity-subtitle" class="activity-subtitle">Select an activity to inspect details.</div>
+  <div class="workspace-main" id="workspace-main">
+    <!-- ── Conversation column ── -->
+    <section class="conversation is-empty" id="conversation" aria-label="Conversation">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-inner">
+          <span class="empty-mark" id="empty-mark"></span>
+          <h1 class="empty-title" id="empty-title">How can I help today?</h1>
+          <p class="empty-subtitle" id="empty-subtitle"></p>
+          <button id="empty-workspace-btn" class="btn btn-primary btn-md code-only hidden" type="button">
+            <span class="icon-slot" data-icon="folderOpen"></span><span class="btn-label">Choose a workspace folder</span>
+          </button>
+          <div class="suggestions" id="suggestions" role="list"></div>
         </div>
-        <button id="activity-close" class="activity-close" title="Close details">×</button>
       </div>
-      <pre id="activity-detail" class="activity-detail"></pre>
+
+      <main id="chat" class="chat" aria-live="polite" aria-label="Messages"></main>
+
+      <div class="composer-region">
+        <div class="composer-column">
+          <!-- Permission requests appear HERE, above the input — never inside the model's messages -->
+          <div id="approval-dock" class="approval-dock" hidden></div>
+
+          <div class="composer" id="composer">
+            <label for="input" class="visually-hidden">Message</label>
+            <textarea id="input" rows="1" placeholder="Message the model…" spellcheck="true"></textarea>
+            <div class="composer-toolbar">
+              <div class="composer-tools composer-tools-left">
+                <button id="workspace-btn" class="chip code-only" type="button" title="Choose a workspace folder">
+                  <span class="icon-slot" data-icon="folder" data-size="14"></span>
+                  <span id="workspace-label" class="chip-label">Choose workspace</span>
+                </button>
+                <div class="code-only tool-slot">
+                  <select id="approval-mode" aria-label="Permission mode">
+                    <option value="strict" data-icon="lock" data-description="Ask before every tool call">Strict</option>
+                    <option value="trusted" data-icon="eye" data-description="Auto-approve reads · ask before edits and commands">Trusted</option>
+                    <option value="yolo" data-icon="zap" data-tone="warning" data-description="Never ask · every tool call runs automatically">Yolo</option>
+                  </select>
+                </div>
+                <label class="switch code-only" title="Draft a plan for your approval before the agent edits anything">
+                  <input type="checkbox" id="plan-mode" class="switch-input">
+                  <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+                  <span class="switch-label">Plan first</span>
+                </label>
+              </div>
+              <div class="composer-tools composer-tools-right">
+                <div class="tool-slot">
+                  <select id="model" aria-label="Model">
+                    <optgroup label="Small · 1–4B">
+                      <option value="qwen3-1.7b">Qwen3 1.7B</option>
+                      <option value="qwen3-4b">Qwen3 4B</option>
+                      <option value="llama-3.2-3b">Llama 3.2 3B</option>
+                    </optgroup>
+                    <optgroup label="Medium · 7–9B">
+                      <option value="qwen3-8b">Qwen3 8B</option>
+                      <option value="meta-llama-3.1-8b">Llama 3.1 8B</option>
+                      <option value="mistral-7b">Mistral 7B</option>
+                      <option value="gemma-2-9b">Gemma 2 9B</option>
+                      <option value="deepseek-r1-distill">DeepSeek R1 8B</option>
+                    </optgroup>
+                    <optgroup label="Large · 14B+">
+                      <option value="qwen3-14b">Qwen3 14B</option>
+                      <option value="qwen3-30b-a3b">Qwen3 30B-A3B (MoE)</option>
+                      <option value="qwen3-32b">Qwen3 32B</option>
+                      <option value="llama-3.3-70b">Llama 3.3 70B</option>
+                    </optgroup>
+                    <optgroup label="Code">
+                      <option value="qwen2.5-coder-7b">Qwen 2.5 Coder 7B</option>
+                      <option value="qwen2.5-coder-32b">Qwen 2.5 Coder 32B</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <button id="stop-btn" class="stop-btn hidden" type="button" title="Stop the agent" aria-label="Stop">
+                  <span class="icon-slot" data-icon="stop"></span>
+                </button>
+                <button id="send-btn" class="send-btn" type="button" title="Send (Enter)" aria-label="Send message">
+                  <span class="icon-slot" data-icon="arrowUp"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="composer-hint">
+            <span id="composer-hint-text" class="hint-keys">
+              <span><kbd class="kbd">Enter</kbd> send</span>
+              <span><kbd class="kbd">Shift</kbd>+<kbd class="kbd">Enter</kbd> new line</span>
+              <span class="code-only"><kbd class="kbd">Shift</kbd>+<kbd class="kbd">Tab</kbd> permissions</span>
+            </span>
+            <span id="run-status" class="run-status" role="status" aria-live="polite"></span>
+            <span id="session-tokens" class="session-tokens" title="Tokens used this session">in 0 · out 0</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Side panel (Code mode): progress + activity details ── -->
+    <aside id="side-panel" class="side-panel" aria-label="Session panel">
+      <div class="panel-header">
+        <div class="panel-tabs" role="tablist" aria-label="Panel">
+          <button id="tab-progress" class="panel-tab active" role="tab" aria-selected="true" aria-controls="panel-progress" data-tab="progress" type="button">
+            Progress <span id="todo-count" class="tab-count" hidden></span>
+          </button>
+          <button id="tab-details" class="panel-tab" role="tab" aria-selected="false" aria-controls="panel-details" data-tab="details" type="button">
+            Details
+          </button>
+        </div>
+        <button id="activity-close" class="icon-btn icon-btn-sm" type="button" title="Close panel" aria-label="Close panel">
+          <span class="icon-slot" data-icon="x" data-size="14"></span>
+        </button>
+      </div>
+
+      <section id="panel-progress" class="panel-body" role="tabpanel" aria-labelledby="tab-progress">
+        <div class="workspace-card" id="workspace-card">
+          <span class="workspace-card-icon icon-slot" data-icon="folder"></span>
+          <div class="workspace-card-text">
+            <div class="workspace-card-name" id="workspace-card-name">No workspace</div>
+            <div class="workspace-card-path" id="workspace-card-path">Pick a folder the agent may read and edit.</div>
+          </div>
+          <button id="workspace-change-btn" class="btn btn-secondary btn-sm" type="button">Choose</button>
+        </div>
+        <div class="panel-section-title">Tasks</div>
+        <div id="todo-panel" class="todo-panel"></div>
+      </section>
+
+      <section id="panel-details" class="panel-body hidden" role="tabpanel" aria-labelledby="tab-details">
+        <div class="details-head">
+          <div id="activity-title" class="activity-title">Activity details</div>
+          <div id="activity-subtitle" class="activity-subtitle">Select a tool step in the conversation to inspect it.</div>
+        </div>
+        <pre id="activity-detail" class="activity-detail"></pre>
+      </section>
     </aside>
   </div>
 
-  <footer>
-    <textarea id="input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="2"></textarea>
-    <button id="new-chat-btn">New Chat</button>
-    <button id="send-btn">Send Message</button>
-  </footer>
+  <!-- ── Floating layers ── -->
+  <div id="popover-root" class="popover-root">
+    <div id="connection-popover" class="popover conn-popover" role="dialog" aria-label="Manager connection" hidden>
+      <div class="popover-title">Manager connection</div>
+      <p class="popover-text">Requests go through the manager, which routes them to an idle worker on the cluster.</p>
+      <label class="field-label" for="backend-url">Manager URL</label>
+      <input id="backend-url" class="input" type="text" spellcheck="false" autocomplete="off" placeholder="http://192.168.1.x:3000" />
+      <div class="popover-actions">
+        <button id="discover-btn" class="btn btn-secondary btn-sm" type="button">
+          <span class="icon-slot" data-icon="broadcast" data-size="14"></span><span class="btn-label">Discover on LAN</span>
+        </button>
+        <button id="ping-btn" class="btn btn-primary btn-sm" type="button">Test connection</button>
+      </div>
+      <div id="discovered" class="discovered-list hidden" role="list" aria-label="Discovered managers"></div>
+      <div id="connection-status" class="connection-status" role="status" aria-live="polite"></div>
+    </div>
+  </div>
 
   <script src="renderer.js"></script>
 </body>

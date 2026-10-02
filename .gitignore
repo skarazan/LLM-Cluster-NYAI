@@ -15,3 +15,7 @@ client/out/
 
 # OS
 Thumbs.db
+
+# Playwright output (client UI tests)
+client/test-results/
+client/playwright-report/

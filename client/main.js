@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, nativeTheme } = require('electron');
 const path   = require('path');
 const fs     = require('fs/promises');
 const fsSync = require('fs');
@@ -6,8 +6,12 @@ const cp     = require('child_process');
 const crypto = require('crypto');
 const { resolveSafe, checkShellCommand } = require('./lib/sandbox');
 const { getTool } = require('./lib/tools');
+const { windowChromeOptions, shouldOpenDevTools, isSafeExternalUrl } = require('./lib/windowChrome');
 
 let mainWindow;
+
+// Optional isolated profile (used by the UI test-suite; handy for running two clients side by side).
+if (process.env.LLM_CLUSTER_USER_DATA) app.setPath('userData', process.env.LLM_CLUSTER_USER_DATA);
 
 const RELEASES_URL = 'https://github.com/skarazan/LLM-Cluster-NYAI/releases/latest';
 const RELEASES_API = 'https://api.github.com/repos/skarazan/LLM-Cluster-NYAI/releases/latest';
@@ -242,12 +246,23 @@ ipcMain.on('open-releases', () => {
   shell.openExternal(RELEASES_URL);
 });
 
+ipcMain.handle('open-external', async (event, url) => {
+  if (!isSafeExternalUrl(url)) return { ok: false, error: 'Blocked URL scheme' };
+  await shell.openExternal(url);
+  return { ok: true };
+});
+
 function createWindow() {
+  // Same dark chrome on every OS: hidden title bar + Window Controls Overlay.
+  nativeTheme.themeSource = 'dark';
+  const chrome = windowChromeOptions(process.platform, process.env);
   const win = new BrowserWindow({
-    width: 900,
-    height: 700,
-    minWidth: 600,
-    minHeight: 500,
+    width: 1240,
+    height: 820,
+    minWidth: 640,
+    minHeight: 520,
+    show: false,
+    ...chrome.options,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -256,9 +271,21 @@ function createWindow() {
     title: 'LLM Cluster Chat',
   });
 
-  win.loadFile('renderer/index.html');
+  win.once('ready-to-show', () => win.show());
+  win.loadFile('renderer/index.html', { query: { frame: chrome.frame, platform: process.platform } });
   win.setMenuBarVisibility(false);
-  win.webContents.openDevTools();
+  if (shouldOpenDevTools(process.argv, process.env)) win.webContents.openDevTools({ mode: 'detach' });
+
+  // Links in model output open in the system browser — never inside the app window.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isSafeExternalUrl(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url.startsWith('file:')) return;
+    e.preventDefault();
+    if (isSafeExternalUrl(url)) shell.openExternal(url);
+  });
   mainWindow = win;
 }
 

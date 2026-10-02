@@ -2,6 +2,8 @@
 
 const { ipcRenderer }   = require('electron');
 const { buildApprovalCard } = require('../renderer/components/approvalCard');
+const { getApprovalDock } = require('../renderer/components/approvalDock');
+const { createPlanCard, createThinkingBlock } = require('../renderer/components/messages');
 const { getTool }       = require('./tools');
 
 const MAX_TOOL_CALLS = Infinity;
@@ -237,13 +239,25 @@ Do NOT output source code. Do NOT call tools.`,
  * Show plan approval card. Returns promise that resolves to 'approve', 'reject', or 'edit:<text>'.
  */
 function showPlanApproval(chat, planText) {
+  // Preferred UX: the plan is shown as a document in the transcript and the
+  // decision (execute / edit / reject) is asked in the approval dock above the
+  // composer — not as buttons inside the model's message.
+  const dock = getApprovalDock(chat && chat.ownerDocument);
+  if (dock) {
+    const card = createPlanCard(planText);
+    chat.appendChild(card.el);
+    chat.scrollTop = chat.scrollHeight;
+    return dock.requestPlan({ planCard: card, transcript: chat });
+  }
   return new Promise((resolve) => {
     const wrap = document.createElement('div');
     wrap.className = 'bubble approval plan-approval';
 
     const header = document.createElement('div');
     header.className = 'approval-header';
-    header.innerHTML = '<span class="approval-icon">📋</span><span><strong>Proposed Plan</strong></span>';
+    const headerTitle = document.createElement('strong');
+    headerTitle.textContent = 'Proposed Plan';
+    header.appendChild(headerTitle);
     wrap.appendChild(header);
 
     const body = document.createElement('pre');
@@ -319,7 +333,7 @@ async function runAgentTurn(opts) {
   let shouldStopAgent = false;
   let taskTodos = [];
   const refreshTodoView = () => {
-    if (typeof updateTodoView === 'function') updateTodoView(formatTodoListForDisplay(taskTodos));
+    if (typeof updateTodoView === 'function') updateTodoView(formatTodoListForDisplay(taskTodos), taskTodos);
   };
 
   // ── Load persisted app-owned state first (source of truth) ─────────
@@ -438,7 +452,7 @@ async function runAgentTurn(opts) {
     approvedPlan = decision.startsWith('edit:') ? decision.slice(5) : planText;
     agentState.lastApprovedPlan = approvedPlan;
     executionPlan = sanitizePlanForExecution(approvedPlan, messages, workspace);
-    appendBubble('assistant', '✓ Plan approved. Executing…');
+    appendBubble('assistant', 'Plan approved — executing…');
     await persistAgentState();
     if (!(await updateRunState(RUN_STATE_EXECUTING, 'plan_approved', { requestId }))) {
       return history;
@@ -589,7 +603,7 @@ ${formatTodoListForPrompt(taskTodos)}
     if (typeof ensurePlaceholderRemoved === 'function') ensurePlaceholderRemoved();
     if (!activeStreamEl) {
       activeStreamEl = document.createElement('div');
-      activeStreamEl.className = 'bubble assistant';
+      activeStreamEl.className = 'bubble assistant streaming';
       const body = document.createElement('div');
       body.className = 'bubble-body';
       activeStreamEl.appendChild(body);
@@ -600,10 +614,10 @@ ${formatTodoListForPrompt(taskTodos)}
     body.dataset.raw = raw;
     // Hide file content inside <write_file>/<append_file> tags and thinking blocks
     let display = raw
-      .replace(/<(think|thinking|reasoning)>\s*/g, '💭 ')
+      .replace(/<(think|thinking|reasoning)>\s*/g, 'Thinking: ')
       .replace(/\s*<\/(think|thinking|reasoning)>/g, '\n─────\n')
-      .replace(/<(write_file|append_file)\s+path=(["'])([^"']*)\2>[^]*?<\/\1>/g, '📝 Writing $3…\n')
-      .replace(/<(write_file|append_file)\s+path=(["'])([^"']*)\2>[^]*$/g, '📝 Writing $3…');
+      .replace(/<(write_file|append_file)\s+path=(["'])([^"']*)\2>[^]*?<\/\1>/g, '→ Writing $3…\n')
+      .replace(/<(write_file|append_file)\s+path=(["'])([^"']*)\2>[^]*$/g, '→ Writing $3…');
     body.textContent = display;
     chat.scrollTop = chat.scrollHeight;
   };
@@ -1555,7 +1569,7 @@ Always close the tag in the same response. No JSON tools. No placeholders.`,
       const suspicious = injectionPatterns.some(p => p.test(argsStr));
       if (suspicious) {
         await updateRunState(RUN_STATE_RECOVERING, `suspicious_tool_args:${toolName}`);
-        appendBubble('error', `⚠ Suspicious content detected in tool call arguments. Tool call blocked.`);
+        appendBubble('error', 'Suspicious content detected in tool call arguments. Tool call blocked.');
         history.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: 'Blocked: suspicious content in arguments.' }) });
         continue;
       }
@@ -2307,8 +2321,20 @@ function shouldAskApproval({ toolName, risk, approvalMode, remembered, args }) {
  * Returns true (approved) or false (rejected).
  */
 function showApprovalCard({ chat, toolName, args, risk, call, remembered }) {
+  const canRemember = !ALWAYS_CONFIRM.has(toolName);
+  // Preferred UX: Claude-Code-style permission prompt docked above the composer.
+  const dock = getApprovalDock(chat && chat.ownerDocument);
+  if (dock) {
+    return dock.requestTool({ toolName, args, risk, canRemember, transcript: chat }).then((choice) => {
+      if (choice === 'always' && canRemember) {
+        const pathArg = args.path || args.root || args.cwd || '';
+        remembered.add(`${toolName}:${pathArg}`);
+        return true;
+      }
+      return choice === 'once' || choice === 'always';
+    });
+  }
   return new Promise((resolve) => {
-    const canRemember = !ALWAYS_CONFIRM.has(toolName);
 
     const card = buildApprovalCard({
       toolName,
@@ -3396,25 +3422,7 @@ function extractToolCallsFromText(text, history = []) {
 
 /** Render a collapsible thinking block in the chat container. */
 function appendThinkingBlock(chat, text) {
-  const wrap = document.createElement('div');
-  wrap.className = 'thinking-block';
-
-  const toggle = document.createElement('button');
-  toggle.className = 'thinking-toggle';
-  toggle.textContent = 'Thinking…';
-
-  const content = document.createElement('div');
-  content.className = 'thinking-content';
-  content.textContent = text;
-
-  toggle.addEventListener('click', () => {
-    toggle.classList.toggle('open');
-    content.classList.toggle('open');
-  });
-
-  wrap.appendChild(toggle);
-  wrap.appendChild(content);
-  chat.appendChild(wrap);
+  chat.appendChild(createThinkingBlock(text));
   chat.scrollTop = chat.scrollHeight;
 }
 
@@ -3432,5 +3440,9 @@ module.exports = {
     getLatestUserPrompt,
     findIncompleteTextWriteBlock,
     extractToolCallsFromText,
+    shouldAskApproval,
+    showApprovalCard,
+    showPlanApproval,
+    formatTodoListForDisplay,
   },
 };
