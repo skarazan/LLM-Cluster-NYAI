@@ -39,6 +39,18 @@ function resolveSafe(workspaceRoot, p) {
 
   // Normalize workspace root (strip trailing sep)
   workspaceRoot = workspaceRoot.replace(/[/\\]+$/, '');
+  // macOS commonly presents /var in a picker while realpath reports /private/var.
+  // Compare canonical paths when checking symlinks, but keep the selected path
+  // for file operations and the lexical traversal check below.
+  let canonicalRoot;
+  try {
+    canonicalRoot = fs.realpathSync(workspaceRoot);
+  } catch {
+    return { ok: false, error: `Workspace root "${workspaceRoot}" is unavailable.` };
+  }
+  if (isDeniedAbsolute(canonicalRoot)) {
+    return { ok: false, error: `Access to "${canonicalRoot}" is not allowed.` };
+  }
 
   // Default undefined/null/empty path to workspace root itself
   if (p === undefined || p === null || p === '' || p === 'undefined' || p === 'null') {
@@ -80,7 +92,7 @@ function resolveSafe(workspaceRoot, p) {
   // Check realpath to catch symlink escape attempts
   try {
     const real = fs.realpathSync(resolved);
-    if (!real.startsWith(workspaceRoot + path.sep) && real !== workspaceRoot) {
+    if (!real.startsWith(canonicalRoot + path.sep) && real !== canonicalRoot) {
       return { ok: false, error: `Symlink "${p}" points outside the workspace.` };
     }
     if (isDeniedAbsolute(real)) {

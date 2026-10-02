@@ -50,16 +50,20 @@ LLM-Cluster-NYAI/
 │
 ├── client/                     Electron desktop app
 │   ├── main.js                 Electron main process — window, IPC, tool execution
+│   ├── UI_COMPONENTS.md        UI logbook: design tokens + every component (read before adding a tab)
 │   ├── lib/
 │   │   ├── agentLoop.js        The code agent brain (~3400 lines)
 │   │   ├── tools.js            Tool definitions (read_file, write_file, etc.)
-│   │   └── sandbox.js          Path sandboxing and shell command filtering
+│   │   ├── sandbox.js          Path sandboxing and shell command filtering
+│   │   └── windowChrome.js     Same dark title bar on Windows / macOS / Linux
 │   ├── renderer/
-│   │   ├── index.html          Chat UI
-│   │   ├── renderer.js         UI logic
-│   │   ├── style.css           Dark theme
-│   │   └── components/
-│   │       └── approvalCard.js Plan approval UI component
+│   │   ├── index.html          App shell (title bar, transcript, composer, side panel)
+│   │   ├── renderer.js         UI controller (IPC + agent wiring)
+│   │   ├── style.css           Imports styles/* (tokens → base → components → layout → views)
+│   │   ├── styles/             Black / dark-navy / rust design system
+│   │   └── components/         Framework-free UI components (approval dock, dropdown,
+│   │                           markdown, messages, todo panel, icons, …)
+│   ├── tests/                  Playwright: unit (Node) + e2e (Electron, fake model)
 │   └── package.json
 │
 ├── start-manager.sh            One-command script to start backend + Cloudflare tunnel
@@ -381,7 +385,19 @@ The agent loop in `agentLoop.js` is the most complex piece of the system. Here's
 
 ### Planning
 
-When you give the agent a task, it first creates a plan — a list of files to create with descriptions. You see this as a "Proposed Plan" card in the UI. You can approve, edit, or reject it. Once approved, the plan becomes a todo list that drives execution.
+When you give the agent a task (with **Plan first** switched on), it first creates a plan — a list of files to create with descriptions. The plan appears as a "Proposed plan" document in the conversation, and the decision (execute / edit / reject) is asked in the **approval dock** directly above the message box. Once approved, the plan becomes a todo list that drives execution and is shown live in the **Progress** side panel.
+
+### Permissions (approval dock)
+
+Tool calls are gated by the permission mode chosen in the composer (Shift+Tab cycles it):
+
+| Mode | Behaviour |
+|------|-----------|
+| Strict | Ask before every tool call |
+| Trusted | Auto-approve read-only tools; ask before edits and commands |
+| Yolo | Never ask |
+
+Requests appear in the dock above the composer (Claude-Code style) — never as a question inside the model's message. Options: **1** allow once, **2** always allow this tool on this path for the session (not offered for `delete_file` / `run_shell`), **3** deny (Esc). Each answer leaves a one-line audit entry in the transcript. Stop and New chat cancel pending requests so a turn never hangs. Note: file contents the model streams as `<write_file>` text blocks are written without a prompt (unchanged agent behaviour).
 
 ### File Writing Strategy
 

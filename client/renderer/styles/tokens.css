@@ -1,0 +1,134 @@
+/* ==========================================================================
+   Design tokens — LLM Cluster Chat
+   Palette: Black (base, ~60%) · Dark Navy (surfaces, ~30%) · Rust Orange (accent, ~10%)
+   Navy (~220°) and rust (~18°) are complementary hues: navy recedes, rust pops,
+   so rust is reserved for primary actions, focus, selection and live state.
+   Every text/background pair below is ≥ 4.5:1 (WCAG AA) — enforced by
+   tests/unit/tokens.spec.js. Change a value here and the test tells you if
+   readability broke.
+   ========================================================================== */
+:root {
+  /* ── Black (base) ── */
+  --black-950: #05070B;          /* code blocks, deepest wells */
+  --black-900: #07090E;          /* app / transcript background */
+
+  /* ── Dark navy (surfaces) ── */
+  --navy-900: #0B1120;           /* chrome: title bar, side panel */
+  --navy-850: #0F1729;           /* raised: composer, cards, dock, menus */
+  --navy-800: #141E34;           /* user bubble, hover on raised */
+  --navy-750: #16213A;           /* user bubble */
+  --navy-700: #1A2742;           /* selected / pressed */
+  --navy-600: #24334F;           /* strong borders, scrollbar thumb hover */
+
+  /* ── Lines ── */
+  --line-1: #151E31;             /* hairline separators */
+  --line-2: #1F2A42;             /* default component border */
+  --line-3: #2C3A57;             /* strong border, scrollbar thumb */
+
+  /* ── Text ── */
+  --text-1: #E8EBF1;             /* primary copy */
+  --text-2: #A9B1C2;             /* secondary copy, labels */
+  --text-3: #8590A6;             /* meta, placeholders, hints */
+  --text-on-accent: #FFF7F2;     /* text on rust fills */
+
+  /* ── Rust orange (accent) ── */
+  --rust-600: #9C3D18;           /* pressed */
+  --rust-500: #B5481C;           /* primary fill (5.1:1 with --text-on-accent) */
+  --rust-450: #BE4D1E;           /* hover fill  (4.65:1 with --text-on-accent) */
+  --rust-300: #E8804F;           /* accent text / icons on dark */
+  --rust-200: #F0A27C;           /* soft accent text */
+  --rust-a10: rgba(206, 92, 44, 0.10);
+  --rust-a16: rgba(206, 92, 44, 0.16);
+  --rust-a28: rgba(206, 92, 44, 0.28);
+  --rust-a45: rgba(206, 92, 44, 0.45);
+  --brand-ink: #0B1120;
+
+  /* ── Semantic (desaturated to sit inside the palette) ── */
+  --success: #4CC38A;
+  --success-a12: rgba(76, 195, 138, 0.12);
+  --warning: #E5B045;
+  --warning-a12: rgba(229, 176, 69, 0.12);
+  --danger: #F0646F;
+  --danger-a12: rgba(240, 100, 111, 0.12);
+  --info: #7AA5F5;
+  --info-a12: rgba(122, 165, 245, 0.12);
+
+  /* ── Code & diff ── */
+  --code-text: #D7DCE6;
+  --diff-add-text: #9FDFBF;
+  --diff-add-bg: rgba(76, 195, 138, 0.08);
+  --diff-del-text: #F6A9B0;
+  --diff-del-bg: rgba(240, 100, 111, 0.08);
+  --white: #FFFFFF;
+
+  /* ── Role aliases (use these in components) ── */
+  --bg-app: var(--black-900);
+  --bg-chrome: var(--navy-900);
+  --bg-raised: var(--navy-850);
+  --bg-hover: var(--navy-800);
+  --bg-selected: var(--navy-700);
+  --bg-code: var(--black-950);
+  --bg-user: var(--navy-750);
+  --accent: var(--rust-500);
+  --accent-hover: var(--rust-450);
+  --accent-text: var(--rust-300);
+  --focus-ring: 0 0 0 2px var(--black-900), 0 0 0 4px var(--rust-300);
+
+  /* ── Typography (system UI stacks resolve to the native UI font on each OS) ── */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    system-ui, Ubuntu, Cantarell, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Code", "Cascadia Mono", Menlo, Consolas,
+    "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 24px;
+  /* Line heights are integer px (not unitless): identical rounding on every OS. */
+  --lh-tight: 30px;              /* 24px display title */
+  --lh-base: 22px;               /* 14px body copy */
+  --lh-sm: 18px;                 /* 12-13px UI text */
+  --lh-xs: 16px;                 /* 11px meta */
+  --lh-code: 20px;               /* 12-13px monospace */
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+
+  /* ── Spacing (4px grid) ── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* ── Radii ── */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-pill: 999px;
+
+  /* ── Elevation ── */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+
+  /* ── Layout ── */
+  --titlebar-h: 44px;
+  --content-w: 800px;
+  --panel-w: 340px;
+  --gutter: 20px;
+
+  /* ── Motion ── */
+  --ease: ease-out;
+  --dur-fast: 120ms;
+  --dur-med: 200ms;
+
+  /* ── Layers ── */
+  --z-panel: 20;
+  --z-popover: 100;
+}
